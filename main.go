@@ -14,7 +14,7 @@ func main() {
 	backup := flag.String("backup", "", "write a consistent copy of the database to this new directory and exit")
 	flag.Parse()
 	if *version {
-		fmt.Println("malachi-memory 0.1.0")
+		fmt.Println("malachi-memory " + serverVersion)
 		return
 	}
 	if dbPath == "" {
