@@ -79,3 +79,7 @@ go test -run '^$' -bench . -benchtime 20x       # tool latency at 1k, 10k and 10
 ```
 
 `testdata/baseline.golden` is the byte-for-byte record of the MCP interface; a diff there is a change clients will see.
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE).
