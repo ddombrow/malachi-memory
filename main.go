@@ -38,5 +38,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "malachi-memory: backed up %s to %s\n", dbPath, *backup)
 		return
 	}
-	serve(db, os.Stdin, os.Stdout)
+	if err := serve(db, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "malachi-memory: serve MCP input: %v\n", err)
+		os.Exit(1)
+	}
 }

@@ -21,7 +21,7 @@ type rpcMessage struct {
 	Params  json.RawMessage `json:"params"`
 }
 
-func serve(db *Db, input io.Reader, output io.Writer) {
+func serve(db *Db, input io.Reader, output io.Writer) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	writer := bufio.NewWriter(output)
@@ -44,12 +44,13 @@ func serve(db *Db, input io.Reader, output io.Writer) {
 			continue
 		}
 		if _, err = writer.Write(append(encoded, '\n')); err != nil {
-			return
+			return err
 		}
 		if err = writer.Flush(); err != nil {
-			return
+			return err
 		}
 	}
+	return scanner.Err()
 }
 
 func handle(db *Db, msg rpcMessage) any {

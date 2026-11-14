@@ -39,6 +39,9 @@ func NewDb(path string) (*Db, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
+	if err := ensurePrivateDir(path); err != nil {
+		return nil, err
+	}
 	db := &Db{path: path}
 	// Open once to create the database and check its schema, waiting like any
 	// other call if another server process holds the lock.
@@ -48,10 +51,31 @@ func NewDb(path string) (*Db, error) {
 	return db, nil
 }
 
+func ensurePrivateDir(path string) error {
+	if err := os.Mkdir(path, 0o700); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("database path %q is not a directory", path)
+	}
+	return os.Chmod(path, 0o700)
+}
+
 // Backup writes a consistent copy of the database to dir, which must not
 // exist. The copy is itself a Pebble database and can replace the original.
 func (d *Db) Backup(dir string) error {
-	_, err := d.With(func(s *Store) (string, error) { return "", s.db.Checkpoint(dir, pebble.WithFlushedWAL()) })
+	_, err := d.With(func(s *Store) (string, error) {
+		if err := s.db.Checkpoint(dir, pebble.WithFlushedWAL()); err != nil {
+			return "", err
+		}
+		return "", os.Chmod(dir, 0o700)
+	})
 	return err
 }
 

@@ -119,6 +119,13 @@ func TestMigrateV1Fixture(t *testing.T) {
 	if v := rawSchemaVersion(t, backups[0]); v != "1" {
 		t.Fatalf("backup schema = %s, want 1", v)
 	}
+	backupInfo, err := os.Stat(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backupInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("migration backup directory mode = %04o, want 0700", got)
+	}
 
 	// Later opens don't migrate or back up again.
 	if _, err = NewDb(path); err != nil {

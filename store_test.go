@@ -27,7 +27,10 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		serve(db, os.Stdin, os.Stdout)
+		if err := serve(db, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -40,6 +43,23 @@ func mustRemember(t *testing.T, s *Store, text string, topics ...string) int64 {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestNewDbEnforcesPrivatePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.pebble")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewDb(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("database directory mode = %04o, want 0700", got)
+	}
 }
 
 func TestPersistsAcrossReopen(t *testing.T) {
@@ -156,6 +176,13 @@ func TestBackupRestores(t *testing.T) {
 	withStore(t, db, func(s *Store) { id = mustRemember(t, s, "Backups are checkpoints", "ops") })
 	if err = db.Backup(dir + "/backup"); err != nil {
 		t.Fatal(err)
+	}
+	backupInfo, err := os.Stat(dir + "/backup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backupInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("backup directory mode = %04o, want 0700", got)
 	}
 	if err = db.Backup(dir + "/backup"); err == nil {
 		t.Fatal("backup over an existing directory succeeded")
@@ -275,8 +302,15 @@ func runServerProcess(path string, p, writes int) error {
 		}
 		replies++
 	}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		_ = stdout.Close()
+	}
 	if err = cmd.Wait(); err != nil {
 		return fmt.Errorf("process %d: %v: %s", p, err, stderr.String())
+	}
+	if scanErr != nil {
+		return fmt.Errorf("process %d: read replies: %w", p, scanErr)
 	}
 	if replies != 2*writes {
 		return fmt.Errorf("process %d: %d replies, want %d", p, replies, 2*writes)

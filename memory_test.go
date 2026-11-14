@@ -24,6 +24,14 @@ func withStore(t *testing.T, db *Db, fn func(*Store)) {
 	}
 }
 
+func TestServeReturnsScannerError(t *testing.T) {
+	input := strings.NewReader(strings.Repeat("x", 8*1024*1024+1))
+	var output bytes.Buffer
+	if err := serve(nil, input, &output); err == nil {
+		t.Fatal("serve returned nil for an oversized input line")
+	}
+}
+
 func TestKnowledgeGraphOperations(t *testing.T) {
 	db := testDB(t)
 	var first, second int64

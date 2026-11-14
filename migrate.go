@@ -47,6 +47,9 @@ func (s *Store) migrateV1() error {
 	if err = s.db.Checkpoint(backup, pebble.WithFlushedWAL()); err != nil {
 		return fmt.Errorf("back up before migrating to schema v%d: %w", schemaVersion, err)
 	}
+	if err = os.Chmod(backup, 0o700); err != nil {
+		return fmt.Errorf("secure migration backup: %w", err)
+	}
 
 	batch := s.db.NewBatch()
 	defer batch.Close()
