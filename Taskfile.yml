@@ -2,10 +2,10 @@ version: '3'
 
 vars:
   BIN: bin/malachi-memory
-  # The binary MCP clients run: whichever malachi-memory is first on PATH,
-  # else ~/.local/bin. Override with: task install INSTALL_PATH=/some/path
+  # Where install puts the binary MCP clients run as `malachi-memory`.
+  # Override with: task install INSTALL_PATH=/some/path
   INSTALL_PATH:
-    sh: command -v malachi-memory || echo "$HOME/.local/bin/malachi-memory"
+    sh: echo "$HOME/.local/bin/malachi-memory"
 
 tasks:
   build:
@@ -16,7 +16,7 @@ tasks:
       - go build -o {{.BIN}} .
 
   install:
-    desc: Build and replace the malachi-memory binary MCP clients run (first on PATH)
+    desc: Build and install malachi-memory (default ~/.local/bin)
     deps: [build]
     cmds:
       - mkdir -p "$(dirname '{{.INSTALL_PATH}}')"
@@ -25,3 +25,9 @@ tasks:
       - cp {{.BIN}} '{{.INSTALL_PATH}}.tmp'
       - mv -f '{{.INSTALL_PATH}}.tmp' '{{.INSTALL_PATH}}'
       - echo "installed $('{{.INSTALL_PATH}}' --version) at {{.INSTALL_PATH}}"
+      # Warn if another malachi-memory would run instead.
+      - |
+        found="$(command -v malachi-memory || true)"
+        if [ "$found" != '{{.INSTALL_PATH}}' ]; then
+          echo "warning: malachi-memory on PATH is ${found:-missing}, not {{.INSTALL_PATH}}" >&2
+        fi

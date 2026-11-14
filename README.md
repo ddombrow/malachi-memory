@@ -24,11 +24,11 @@ Requires Go 1.26 or later. Tasks run with `go tool task` (pinned in `go.mod`).
 
 ```sh
 go tool task build      # bin/malachi-memory
-go tool task install    # replace the malachi-memory on PATH (else ~/.local/bin)
+go tool task install    # ~/.local/bin/malachi-memory
 mkdir -p ~/.local/share/malachi-memory
 ```
 
-`install` overwrites whichever `malachi-memory` is first on PATH; pass `INSTALL_PATH=...` to put it elsewhere.
+`install` replaces the binary in place, so running sessions pick it up on their next start; pass `INSTALL_PATH=...` to put it elsewhere. It warns if a different `malachi-memory` comes first on PATH.
 
 Without a clone, `go install github.com/ddombrow/malachi-memory-mcp@latest` also works, but names the binary `malachi-memory-mcp`; use that as `command` below.
 
