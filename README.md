@@ -30,6 +30,8 @@ mkdir -p ~/.local/share/malachi-memory
 
 `install` overwrites whichever `malachi-memory` is first on PATH; pass `INSTALL_PATH=...` to put it elsewhere.
 
+Without a clone, `go install github.com/ddombrow/malachi-memory-mcp@latest` also works, but names the binary `malachi-memory-mcp`; use that as `command` below.
+
 `~/.malachi/mcp.json`:
 
 ```json

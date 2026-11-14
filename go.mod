@@ -1,4 +1,4 @@
-module github.com/ddombrow/malachi-memory
+module github.com/ddombrow/malachi-memory-mcp
 
 go 1.26.4
 
