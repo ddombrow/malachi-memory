@@ -162,3 +162,16 @@ func TestMigratedServesSameOutput(t *testing.T) {
 		t.Fatalf("recall = %q", out)
 	}
 }
+
+// A read-only call that meets a v1 database opens read-write and migrates.
+func TestViewMigrates(t *testing.T) {
+	path := copyFixture(t)
+	db := &Db{path: path} // skip NewDb, which would migrate first
+	out, err := db.View(func(s *Store) (string, error) { return callTool(s, "topics", map[string]any{}) })
+	if err != nil || !strings.HasPrefix(out, "ci (2)\ngo (2)") {
+		t.Fatalf("topics = %q, %v", out, err)
+	}
+	if v := rawSchemaVersion(t, path); v != "2" {
+		t.Fatalf("schema after View = %s", v)
+	}
+}

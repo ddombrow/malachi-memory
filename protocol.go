@@ -88,7 +88,11 @@ func handle(db *Db, msg rpcMessage) any {
 			Arguments map[string]any `json:"arguments"`
 		}
 		_ = json.Unmarshal(msg.Params, &req)
-		text, err := db.With(func(store *Store) (string, error) { return callTool(store, req.Name, req.Arguments) })
+		open := db.With
+		if readOnlyTool(req.Name) {
+			open = db.View
+		}
+		text, err := open(func(store *Store) (string, error) { return callTool(store, req.Name, req.Arguments) })
 		content := map[string]any{"content": []map[string]string{{"type": "text", "text": text}}}
 		if err != nil {
 			content["content"] = []map[string]string{{"type": "text", "text": err.Error()}}
@@ -125,6 +129,18 @@ func toolDefinitions() []map[string]any {
 		{"name": "forget", "description": "Delete a memory by its id (the #number recall shows), when it is wrong or out of date.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"id": map[string]string{"type": "integer"}}, "required": []string{"id"}}, "annotations": map[string]any{"destructiveHint": true}},
 		{"name": "topics", "description": "List topics with how many memories each has; with related_to, the topics that share memories with that one.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"related_to": map[string]string{"type": "string"}}}, "annotations": readOnly},
 	}
+}
+
+// readOnlyTool reports whether a tool only reads, matching the readOnlyHint
+// annotations above; those tools open the database read-only.
+func readOnlyTool(name string) bool {
+	for _, tool := range toolDefinitions() {
+		if tool["name"] == name {
+			annotations, _ := tool["annotations"].(map[string]any)
+			return annotations["readOnlyHint"] == true
+		}
+	}
+	return false
 }
 
 func callTool(s *Store, name string, args map[string]any) (string, error) {

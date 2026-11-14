@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -309,4 +310,27 @@ func TestBackupFlag(t *testing.T) {
 			t.Fatalf("copy has %d memories", len(all))
 		}
 	})
+}
+
+func TestViewIsReadOnly(t *testing.T) {
+	db := testDB(t)
+	withStore(t, db, func(s *Store) { mustRemember(t, s, "written before the view", "x") })
+	out, err := db.View(func(s *Store) (string, error) { return callTool(s, "recall", map[string]any{"topic": "x"}) })
+	if err != nil || !strings.Contains(out, "written before the view") {
+		t.Fatalf("view recall = %q, %v", out, err)
+	}
+	_, err = db.View(func(s *Store) (string, error) { return callTool(s, "remember", map[string]any{"text": "nope"}) })
+	if !errors.Is(err, pebble.ErrReadOnly) {
+		t.Fatalf("write through View: err = %v, want ErrReadOnly", err)
+	}
+	for _, tool := range []string{"recall", "topics"} {
+		if !readOnlyTool(tool) {
+			t.Fatalf("%s should open read-only", tool)
+		}
+	}
+	for _, tool := range []string{"remember", "forget", "nope"} {
+		if readOnlyTool(tool) {
+			t.Fatalf("%s must not open read-only", tool)
+		}
+	}
 }

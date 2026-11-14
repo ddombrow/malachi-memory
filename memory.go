@@ -58,10 +58,25 @@ func (d *Db) Backup(dir string) error {
 
 // Pebble uses an exclusive database lock. Opening around each tool call lets
 // separate server processes take turns using the same database.
-func (d *Db) With(f func(*Store) (string, error)) (string, error) {
+//
+// With opens the database read-write. A read-write open costs about 30 ms,
+// almost all of it syncs for the new WAL, manifest and options files.
+func (d *Db) With(f func(*Store) (string, error)) (string, error) { return d.run(false, f) }
+
+// View opens the database read-only, which writes and syncs nothing: under
+// 1 ms, and the lock is held only that long. Writes through it fail with
+// pebble.ErrReadOnly. If the schema needs migrating, View opens read-write
+// instead so the migration runs.
+func (d *Db) View(f func(*Store) (string, error)) (string, error) { return d.run(true, f) }
+
+func (d *Db) run(readOnly bool, f func(*Store) (string, error)) (string, error) {
 	deadline := time.Now().Add(lockWait)
 	for {
-		s, err := d.open()
+		s, err := d.open(readOnly)
+		if errors.Is(err, errNeedsMigration) {
+			readOnly = false
+			continue
+		}
 		if err == nil {
 			result, callErr := f(s)
 			closeErr := s.Close()
@@ -102,13 +117,13 @@ func (quietLogger) Fatalf(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
-func (d *Db) open() (*Store, error) {
-	db, err := pebble.Open(d.path, &pebble.Options{Logger: quietLogger{}})
+func (d *Db) open(readOnly bool) (*Store, error) {
+	db, err := pebble.Open(d.path, &pebble.Options{Logger: quietLogger{}, ReadOnly: readOnly})
 	if err != nil {
 		return nil, err
 	}
 	s := &Store{db: db, path: d.path}
-	if err = s.checkSchema(); err != nil {
+	if err = s.checkSchema(readOnly); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -154,9 +169,16 @@ type memoryRecord struct {
 	Created int64  `json:"created"`
 }
 
-func (s *Store) checkSchema() error {
+// errNeedsMigration means a read-only open found a database that must be
+// written before use: new, unversioned, or an older schema.
+var errNeedsMigration = errors.New("database schema needs a read-write open")
+
+func (s *Store) checkSchema(readOnly bool) error {
 	value, closer, err := s.db.Get(schemaVersionKey)
 	if errors.Is(err, pebble.ErrNotFound) {
+		if readOnly {
+			return errNeedsMigration
+		}
 		empty, err := s.isEmpty()
 		if err != nil {
 			return err
@@ -180,6 +202,9 @@ func (s *Store) checkSchema() error {
 	case schemaVersion:
 		return nil
 	case 1:
+		if readOnly {
+			return errNeedsMigration
+		}
 		return s.migrateV1()
 	default:
 		return fmt.Errorf("database schema v%d is not supported by this server (v%d)", v, schemaVersion)

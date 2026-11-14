@@ -77,18 +77,27 @@ func BenchmarkTools(b *testing.B) {
 			tool := strings.SplitN(c.name, "/", 2)[0]
 			b.Run(fmt.Sprintf("%s/n=%d", c.name, n), func(b *testing.B) {
 				for i := 0; i < b.N; i++ {
-					if _, err := db.With(func(s *Store) (string, error) { return callTool(s, tool, c.args) }); err != nil {
+					open := db.With
+					if readOnlyTool(tool) {
+						open = db.View
+					}
+					if _, err := open(func(s *Store) (string, error) { return callTool(s, tool, c.args) }); err != nil {
 						b.Fatal(err)
 					}
 				}
 			})
 		}
-		b.Run(fmt.Sprintf("open-close/n=%d", n), func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				if _, err := db.With(func(*Store) (string, error) { return "", nil }); err != nil {
-					b.Fatal(err)
+		for _, mode := range []struct {
+			name string
+			open func(func(*Store) (string, error)) (string, error)
+		}{{"open-close/read-write", db.With}, {"open-close/read-only", db.View}} {
+			b.Run(fmt.Sprintf("%s/n=%d", mode.name, n), func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					if _, err := mode.open(func(*Store) (string, error) { return "", nil }); err != nil {
+						b.Fatal(err)
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 }

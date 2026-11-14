@@ -88,6 +88,19 @@ v1 bugs the new layout removes:
 
 All but search now cost about one database open (~30 ms). `remember` at 100k (~100 ms) is still slower than at 10k and is worth a look, likely Pebble work on open over the large seeded WAL rather than the graph writes.
 
+### Read-only opens (2026-11-13)
+
+A read-write Pebble open costs ~28 ms and its close ~5 ms, nearly all of it syncing a new WAL, manifest and options file (macOS full syncs). A read-only open writes nothing and takes ~0.4 ms; it still takes the exclusive lock, so it is safe beside other sessions' writes. `recall` and `topics` (the tools marked `readOnlyHint`) now open read-only via `Db.View`; a read-only open that finds a schema needing migration reopens read-write.
+
+| call | 1k | 10k | 100k |
+|---|---|---|---|
+| recall by topic / recent, topics | 0.2-0.3 ms | 0.3 ms | 0.3 ms |
+| topics related_to | 0.3 ms | 1.2 ms | 8.7 ms |
+| recall by query | 5 ms | 37 ms | 345 ms |
+| remember (read-write) | 45 ms | 47 ms | 103 ms |
+
+Reads now hold the lock for well under a millisecond, except search, whose full scan is now its whole cost and the main reason a read holds the lock. That moves Phase 3 up if stores grow past a few thousand memories; at ~1k it costs 5 ms.
+
 ## Phase 3: Add an inverted search index
 
 Replace the current search scan with a derived token-to-memory postings index.
