@@ -20,12 +20,15 @@ The server's instructions tell the model to store what the user said or decided,
 
 ## Build and configure
 
-Requires Go 1.23 or later.
+Requires Go 1.26 or later. Tasks run with `go tool task` (pinned in `go.mod`).
 
 ```sh
-go build -o malachi-memory .
+go tool task build      # bin/malachi-memory
+go tool task install    # replace the malachi-memory on PATH (else ~/.local/bin)
 mkdir -p ~/.local/share/malachi-memory
 ```
+
+`install` overwrites whichever `malachi-memory` is first on PATH; pass `INSTALL_PATH=...` to put it elsewhere.
 
 `~/.malachi/mcp.json`:
 

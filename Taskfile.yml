@@ -1,0 +1,27 @@
+version: '3'
+
+vars:
+  BIN: bin/malachi-memory
+  # The binary MCP clients run: whichever malachi-memory is first on PATH,
+  # else ~/.local/bin. Override with: task install INSTALL_PATH=/some/path
+  INSTALL_PATH:
+    sh: command -v malachi-memory || echo "$HOME/.local/bin/malachi-memory"
+
+tasks:
+  build:
+    desc: Build {{.BIN}}
+    sources: ['**/*.go', go.mod, go.sum]
+    generates: ['{{.BIN}}']
+    cmds:
+      - go build -o {{.BIN}} .
+
+  install:
+    desc: Build and replace the malachi-memory binary MCP clients run (first on PATH)
+    deps: [build]
+    cmds:
+      - mkdir -p "$(dirname '{{.INSTALL_PATH}}')"
+      # Copy beside the target, then rename over it, so a session starting
+      # mid-install never runs a half-written binary.
+      - cp {{.BIN}} '{{.INSTALL_PATH}}.tmp'
+      - mv -f '{{.INSTALL_PATH}}.tmp' '{{.INSTALL_PATH}}'
+      - echo "installed $('{{.INSTALL_PATH}}' --version) at {{.INSTALL_PATH}}"

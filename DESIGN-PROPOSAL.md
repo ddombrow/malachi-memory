@@ -66,6 +66,28 @@ Make node and edge records the source of truth instead of duplicating topic memb
 
 **Exit criteria:** graph reads use node and edge records; a migration test demonstrates that existing memories, topics, and relationships are preserved.
 
+### Phase 2 results (2026-11-13)
+
+Done: schema v2 (layout documented at the top of the keys section in `memory.go`). Memory nodes no longer carry topics; ABOUT edges are stored in both directions (`e/<topic>\x00<id>` and `r/<id><topic>`, the latter holding topic order), and topic nodes hold their memory count and are deleted when it reaches zero. Remember and forget update the node, both edges and the count in one batch.
+
+Migration (`migrate.go`) runs on the first open of a v1 or unversioned database: it writes a checkpoint to `<db>.v1-backup-<timestamp>`, rebuilds all edges and counts from the v1 memory records in one batch with the version bump, then reads the result back and compares it with the v1 records. An interrupted migration leaves v1 intact and reruns. It is tested against `testdata/v1.pebble`, a database written by the v1 server itself.
+
+v1 bugs the new layout removes:
+- Topics containing `/` collided: `e/ci/` prefix-matched the edges of `ci/cd`. The edge key now ends a topic with `\x00`, and control characters are stripped from topic names.
+- Forgotten topics left orphaned `t/` keys; migration drops them.
+
+`recent` and `recall by topic` walk ids backwards with a limit instead of loading and sorting every memory; `topics` reads the counts. At 100k memories (`-benchtime 20x`):
+
+| call | Phase 1 | Phase 2 |
+|---|---|---|
+| recall recent | 98 ms | 31 ms |
+| topics | 100 ms | 33 ms |
+| topics related_to | 98 ms | 40 ms |
+| recall by topic | 45 ms | 29 ms |
+| recall by query | 357 ms | 378 ms (unchanged: Phase 3) |
+
+All but search now cost about one database open (~30 ms). `remember` at 100k (~100 ms) is still slower than at 10k and is worth a look, likely Pebble work on open over the large seeded WAL rather than the graph writes.
+
 ## Phase 3: Add an inverted search index
 
 Replace the current search scan with a derived token-to-memory postings index.

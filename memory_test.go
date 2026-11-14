@@ -126,3 +126,17 @@ func TestNormalizeTopics(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestTopicControlCharactersDropped(t *testing.T) {
+	db := testDB(t)
+	withStore(t, db, func(s *Store) {
+		id := mustRemember(t, s, "nul in topic", "a\x00b", "ab\n")
+		m, err := s.Get(id)
+		if err != nil || strings.Join(m.Topics, ",") != "ab" {
+			t.Fatalf("topics = %v, %v", m, err)
+		}
+		if about, _ := s.About("a\x00b", 10); len(about) != 1 {
+			t.Fatalf("about = %v", about)
+		}
+	})
+}

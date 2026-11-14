@@ -17,7 +17,8 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-// Memory is a graph node containing a durable fact and links to topic nodes.
+// Memory is a memory node with the topics its ABOUT edges point to, in the
+// order they were given.
 type Memory struct {
 	ID      int64    `json:"id"`
 	Text    string   `json:"text"`
@@ -25,7 +26,11 @@ type Memory struct {
 	Created int64    `json:"created"`
 }
 
-type Store struct{ db *pebble.DB }
+// Store is an open database; path is kept for the backup a migration takes.
+type Store struct {
+	db   *pebble.DB
+	path string
+}
 type Db struct{ path string }
 
 func NewDb(path string) (*Db, error) {
@@ -102,7 +107,7 @@ func (d *Db) open() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, path: d.path}
 	if err = s.checkSchema(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -110,42 +115,31 @@ func (d *Db) open() (*Store, error) {
 	return s, nil
 }
 
-// schemaVersion is the on-disk key layout this server reads and writes.
-// v1: m/<id> memory JSON (with topics), t/<topic>, e/<topic>/<id>, meta/next-id.
-const schemaVersion = 1
-
-func (s *Store) checkSchema() error {
-	value, closer, err := s.db.Get(schemaVersionKey)
-	if errors.Is(err, pebble.ErrNotFound) {
-		// New databases, and those written before versioning, use the v1 layout.
-		return s.db.Set(schemaVersionKey, uint64Bytes(schemaVersion), pebble.Sync)
-	}
-	if err != nil {
-		return err
-	}
-	defer closer.Close()
-	if len(value) != 8 {
-		return errors.New("database schema version is corrupt")
-	}
-	if v := binary.BigEndian.Uint64(value); v != schemaVersion {
-		return fmt.Errorf("database schema v%d is not supported by this server (v%d)", v, schemaVersion)
-	}
-	return nil
-}
-
-func uint64Bytes(v uint64) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, v)
-	return b
-}
-
-func (s *Store) Close() error { return s.db.Close() }
+// The database is a small property graph in ordered keys. Graph records are
+// authoritative; nothing else repeats them.
+//
+// Schema v2:
+//
+//	m/<id>               memory node: JSON {id, text, created}
+//	t/<topic>            topic node: number of memories about it (uint64)
+//	e/<topic>\x00<id>    ABOUT edge, topic -> memory (empty value)
+//	r/<id><topic>        ABOUT edge, memory -> topic: its position (uint64)
+//	meta/next-id         next memory id (uint64)
+//	meta/schema-version  schema version (uint64)
+//
+// Ids are big-endian uint64s, so memories iterate oldest first and the
+// edges of one topic or one memory are contiguous. Topic names cannot contain
+// control characters, so the \x00 after a topic name ends it unambiguously.
+// v1 kept topics in the memory JSON, t/ values were the name, and e/ keys
+// used "/" after the topic; see migrate.go.
+const schemaVersion = 2
 
 var (
-	memoryPrefix = []byte("m/")
-	topicPrefix  = []byte("t/")
-	edgePrefix   = []byte("e/")
-	nextIDKey    = []byte("meta/next-id")
+	memoryPrefix  = []byte("m/")
+	topicPrefix   = []byte("t/")
+	edgePrefix    = []byte("e/")
+	reversePrefix = []byte("r/")
+	nextIDKey     = []byte("meta/next-id")
 
 	schemaVersionKey = []byte("meta/schema-version")
 )
@@ -153,20 +147,83 @@ var (
 // now is replaced in tests for deterministic creation times.
 var now = time.Now
 
-func memoryKey(id int64) []byte {
-	key := make([]byte, len(memoryPrefix)+8)
-	copy(key, memoryPrefix)
-	binary.BigEndian.PutUint64(key[len(memoryPrefix):], uint64(id))
-	return key
+// memoryRecord is the stored form of a memory node.
+type memoryRecord struct {
+	ID      int64  `json:"id"`
+	Text    string `json:"text"`
+	Created int64  `json:"created"`
 }
-func edgeKey(id int64, topic string) []byte {
-	key := make([]byte, len(edgePrefix)+len(topic)+1+8)
-	copy(key, edgePrefix)
-	copy(key[len(edgePrefix):], topic)
-	key[len(edgePrefix)+len(topic)] = '/'
-	binary.BigEndian.PutUint64(key[len(edgePrefix)+len(topic)+1:], uint64(id))
-	return key
+
+func (s *Store) checkSchema() error {
+	value, closer, err := s.db.Get(schemaVersionKey)
+	if errors.Is(err, pebble.ErrNotFound) {
+		empty, err := s.isEmpty()
+		if err != nil {
+			return err
+		}
+		if !empty {
+			// Written before versioning: the v1 layout.
+			return s.migrateV1()
+		}
+		return s.db.Set(schemaVersionKey, uint64Bytes(schemaVersion), pebble.Sync)
+	}
+	if err != nil {
+		return err
+	}
+	if len(value) != 8 {
+		closer.Close()
+		return errors.New("database schema version is corrupt")
+	}
+	v := binary.BigEndian.Uint64(value)
+	closer.Close()
+	switch v {
+	case schemaVersion:
+		return nil
+	case 1:
+		return s.migrateV1()
+	default:
+		return fmt.Errorf("database schema v%d is not supported by this server (v%d)", v, schemaVersion)
+	}
 }
+
+func (s *Store) isEmpty() (bool, error) {
+	iter, err := s.db.NewIter(nil)
+	if err != nil {
+		return false, err
+	}
+	defer iter.Close()
+	return !iter.First(), iter.Error()
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func uint64Bytes(v uint64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, v)
+	return b
+}
+
+func concat(parts ...[]byte) []byte {
+	var out []byte
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+func memoryKey(id int64) []byte    { return concat(memoryPrefix, uint64Bytes(uint64(id))) }
+func topicKey(topic string) []byte { return concat(topicPrefix, []byte(topic)) }
+func topicEdgesPrefix(topic string) []byte {
+	return concat(edgePrefix, []byte(topic), []byte{0})
+}
+func edgeKey(topic string, id int64) []byte {
+	return concat(topicEdgesPrefix(topic), uint64Bytes(uint64(id)))
+}
+func memoryEdgesPrefix(id int64) []byte { return concat(reversePrefix, uint64Bytes(uint64(id))) }
+func reverseKey(id int64, topic string) []byte {
+	return concat(memoryEdgesPrefix(id), []byte(topic))
+}
+
 func (s *Store) Remember(text string, topics []string) (int64, error) {
 	return s.remember(text, topics, now().Unix(), pebble.Sync)
 }
@@ -177,40 +234,71 @@ func (s *Store) remember(text string, topics []string, created int64, opts *pebb
 		return 0, errors.New("text is empty")
 	}
 	topics = normalizeTopics(topics)
-	id := int64(1)
-	if value, closer, err := s.db.Get(nextIDKey); err == nil {
-		if len(value) == 8 {
-			id = int64(binary.BigEndian.Uint64(value))
-		}
-		_ = closer.Close()
-	} else if !errors.Is(err, pebble.ErrNotFound) {
-		return 0, err
-	}
-	m := Memory{ID: id, Text: text, Topics: topics, Created: created}
-	encoded, err := json.Marshal(m)
+	id, err := s.getUint(nextIDKey)
 	if err != nil {
 		return 0, err
 	}
+	if id == 0 {
+		id = 1
+	}
 	batch := s.db.NewBatch()
 	defer batch.Close()
-	if err = batch.Set(memoryKey(id), encoded, nil); err != nil {
+	if err = s.putMemory(batch, memoryRecord{ID: int64(id), Text: text, Created: created}, topics); err != nil {
 		return 0, err
 	}
-	for _, topic := range topics {
-		if err = batch.Set(append(append([]byte(nil), topicPrefix...), []byte(topic)...), []byte(topic), nil); err != nil {
-			return 0, err
+	if err = batch.Set(nextIDKey, uint64Bytes(id+1), nil); err != nil {
+		return 0, err
+	}
+	return int64(id), batch.Commit(opts)
+}
+
+// putMemory adds a memory node with ABOUT edges to normalized topics. Topic
+// counts are read from the database, so a batch must not add two memories
+// about the same new topic; the migration builds its own counts instead.
+func (s *Store) putMemory(batch *pebble.Batch, m memoryRecord, topics []string) error {
+	encoded, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	if err = batch.Set(memoryKey(m.ID), encoded, nil); err != nil {
+		return err
+	}
+	for pos, topic := range topics {
+		count, err := s.getUint(topicKey(topic))
+		if err != nil {
+			return err
 		}
-		if err = batch.Set(edgeKey(id, topic), nil, nil); err != nil {
-			return 0, err
+		if err = batch.Set(topicKey(topic), uint64Bytes(count+1), nil); err != nil {
+			return err
+		}
+		if err = putEdge(batch, m.ID, topic, pos); err != nil {
+			return err
 		}
 	}
-	if err = batch.Set(nextIDKey, uint64Bytes(uint64(id+1)), nil); err != nil {
+	return nil
+}
+
+func putEdge(batch *pebble.Batch, id int64, topic string, pos int) error {
+	if err := batch.Set(edgeKey(topic, id), nil, nil); err != nil {
+		return err
+	}
+	return batch.Set(reverseKey(id, topic), uint64Bytes(uint64(pos)), nil)
+}
+
+// getUint reads a uint64 value, returning 0 when the key is absent.
+func (s *Store) getUint(key []byte) (uint64, error) {
+	value, closer, err := s.db.Get(key)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
 		return 0, err
 	}
-	if err = batch.Commit(opts); err != nil {
-		return 0, err
+	defer closer.Close()
+	if len(value) != 8 {
+		return 0, fmt.Errorf("corrupt value for key %q", key)
 	}
-	return id, nil
+	return binary.BigEndian.Uint64(value), nil
 }
 
 func (s *Store) Get(id int64) (*Memory, error) {
@@ -221,14 +309,49 @@ func (s *Store) Get(id int64) (*Memory, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer closer.Close()
-	var m Memory
-	if err = json.Unmarshal(value, &m); err != nil {
+	var r memoryRecord
+	err = json.Unmarshal(value, &r)
+	closer.Close()
+	if err != nil {
 		return nil, err
 	}
-	return &m, nil
+	topics, err := s.memoryTopics(id)
+	if err != nil {
+		return nil, err
+	}
+	return &Memory{ID: r.ID, Text: r.Text, Topics: topics, Created: r.Created}, nil
 }
 
+// memoryTopics follows a memory's ABOUT edges, in the order they were given.
+func (s *Store) memoryTopics(id int64) ([]string, error) {
+	prefix := memoryEdgesPrefix(id)
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+	var edges []topicEdge
+	for iter.First(); iter.Valid(); iter.Next() {
+		edges = append(edges, topicEdge{string(iter.Key()[len(prefix):]), binary.BigEndian.Uint64(iter.Value())})
+	}
+	return sortedTopics(edges), iter.Error()
+}
+
+type topicEdge struct {
+	topic string
+	pos   uint64
+}
+
+func sortedTopics(edges []topicEdge) []string {
+	sort.Slice(edges, func(i, j int) bool { return edges[i].pos < edges[j].pos })
+	out := make([]string, len(edges))
+	for i, e := range edges {
+		out[i] = e.topic
+	}
+	return out
+}
+
+// Forget deletes a memory node and its edges, and any topic left with none.
 func (s *Store) Forget(id int64) (bool, error) {
 	m, err := s.Get(id)
 	if err != nil || m == nil {
@@ -240,41 +363,84 @@ func (s *Store) Forget(id int64) (bool, error) {
 		return false, err
 	}
 	for _, topic := range m.Topics {
-		if err = batch.Delete(edgeKey(id, topic), nil); err != nil {
+		if err = batch.Delete(edgeKey(topic, id), nil); err != nil {
+			return false, err
+		}
+		if err = batch.Delete(reverseKey(id, topic), nil); err != nil {
+			return false, err
+		}
+		count, err := s.getUint(topicKey(topic))
+		if err != nil {
+			return false, err
+		}
+		if count <= 1 {
+			err = batch.Delete(topicKey(topic), nil)
+		} else {
+			err = batch.Set(topicKey(topic), uint64Bytes(count-1), nil)
+		}
+		if err != nil {
 			return false, err
 		}
 	}
-	if err = batch.Commit(pebble.Sync); err != nil {
-		return false, err
-	}
-	return true, nil
+	return true, batch.Commit(pebble.Sync)
 }
 
+// Memories returns every memory, oldest first, reading the memory nodes and
+// the memory -> topic edges in two ordered scans.
 func (s *Store) Memories() ([]Memory, error) {
-	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: memoryPrefix, UpperBound: prefixEnd(memoryPrefix)})
+	topics := map[int64][]topicEdge{}
+	edges, err := s.db.NewIter(&pebble.IterOptions{LowerBound: reversePrefix, UpperBound: prefixEnd(reversePrefix)})
 	if err != nil {
 		return nil, err
 	}
-	defer iter.Close()
-	var out []Memory
-	for iter.First(); iter.Valid(); iter.Next() {
-		var m Memory
-		if err = json.Unmarshal(iter.Value(), &m); err != nil {
-			return nil, err
-		}
-		out = append(out, m)
+	for edges.First(); edges.Valid(); edges.Next() {
+		key := edges.Key()[len(reversePrefix):]
+		id := int64(binary.BigEndian.Uint64(key[:8]))
+		topics[id] = append(topics[id], topicEdge{string(key[8:]), binary.BigEndian.Uint64(edges.Value())})
 	}
-	return out, iter.Error()
+	if err = errors.Join(edges.Error(), edges.Close()); err != nil {
+		return nil, err
+	}
+	var out []Memory
+	err = s.scanMemories(false, func(r memoryRecord) bool {
+		out = append(out, Memory{ID: r.ID, Text: r.Text, Topics: sortedTopics(topics[r.ID]), Created: r.Created})
+		return true
+	})
+	return out, err
+}
+
+// scanMemories visits memory nodes in id order, newest first if reverse,
+// until visit returns false.
+func (s *Store) scanMemories(reverse bool, visit func(memoryRecord) bool) error {
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: memoryPrefix, UpperBound: prefixEnd(memoryPrefix)})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	valid, step := iter.First(), iter.Next
+	if reverse {
+		valid, step = iter.Last(), iter.Prev
+	}
+	for ; valid; valid = step() {
+		var r memoryRecord
+		if err = json.Unmarshal(iter.Value(), &r); err != nil {
+			return err
+		}
+		if !visit(r) {
+			break
+		}
+	}
+	return iter.Error()
 }
 
 func (s *Store) Search(query string, limit int) ([]Memory, error) {
-	memories, err := s.Memories()
-	if err != nil {
-		return nil, err
-	}
 	terms := tokenize(query)
 	if len(terms) == 0 {
 		return nil, nil
+	}
+	memories, err := s.Memories()
+	if err != nil {
+		return nil, err
 	}
 	df := make(map[string]int)
 	for _, m := range memories {
@@ -310,10 +476,13 @@ func (s *Store) Search(query string, limit int) ([]Memory, error) {
 		}
 	}
 	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].score == hits[j].score {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
+		}
+		if hits[i].memory.Created != hits[j].memory.Created {
 			return hits[i].memory.Created > hits[j].memory.Created
 		}
-		return hits[i].score > hits[j].score
+		return hits[i].memory.ID > hits[j].memory.ID
 	})
 	if len(hits) > limit {
 		hits = hits[:limit]
@@ -325,21 +494,16 @@ func (s *Store) Search(query string, limit int) ([]Memory, error) {
 	return out, nil
 }
 
+// About follows a topic's ABOUT edges, newest memory first. Ids are assigned
+// in creation order, so walking the edges backwards needs no sort.
 func (s *Store) About(topic string, limit int) ([]Memory, error) {
-	topic = strings.ToLower(strings.TrimSpace(topic))
-	prefix := append(append([]byte(nil), edgePrefix...), []byte(topic+"/")...)
-	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+	prefix := topicEdgesPrefix(normalizeTopic(topic))
+	ids, err := s.edgeIDs(prefix, true, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer iter.Close()
-	out := make([]Memory, 0)
-	for iter.First(); iter.Valid(); iter.Next() {
-		key := iter.Key()
-		if len(key) < len(prefix)+8 {
-			continue
-		}
-		id := int64(binary.BigEndian.Uint64(key[len(prefix):]))
+	out := make([]Memory, 0, len(ids))
+	for _, id := range ids {
 		m, err := s.Get(id)
 		if err != nil {
 			return nil, err
@@ -348,50 +512,79 @@ func (s *Store) About(topic string, limit int) ([]Memory, error) {
 			out = append(out, *m)
 		}
 	}
-	if err := iter.Error(); err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Created > out[j].Created })
-	if len(out) > limit {
-		out = out[:limit]
-	}
 	return out, nil
 }
 
+// edgeIDs lists the memory ids at the end of a topic's edges; limit 0 means all.
+func (s *Store) edgeIDs(prefix []byte, reverse bool, limit int) ([]int64, error) {
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+	valid, step := iter.First(), iter.Next
+	if reverse {
+		valid, step = iter.Last(), iter.Prev
+	}
+	var ids []int64
+	for ; valid && (limit == 0 || len(ids) < limit); valid = step() {
+		if key := iter.Key(); len(key) == len(prefix)+8 {
+			ids = append(ids, int64(binary.BigEndian.Uint64(key[len(prefix):])))
+		}
+	}
+	return ids, iter.Error()
+}
+
+// Recent returns the newest memories, walking memory nodes from the end.
 func (s *Store) Recent(limit int) ([]Memory, error) {
-	out, err := s.Memories()
+	var records []memoryRecord
+	err := s.scanMemories(true, func(r memoryRecord) bool {
+		records = append(records, r)
+		return len(records) < limit
+	})
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Created > out[j].Created })
-	if len(out) > limit {
-		out = out[:limit]
+	out := make([]Memory, 0, len(records))
+	for _, r := range records {
+		topics, err := s.memoryTopics(r.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Memory{ID: r.ID, Text: r.Text, Topics: topics, Created: r.Created})
 	}
 	return out, nil
 }
 
+// Topics lists topics with how many memories each has, from the counts on
+// topic nodes. With relatedTo, it counts the topics of memories about that
+// one, which includes relatedTo itself.
 func (s *Store) Topics(relatedTo string) ([][2]string, error) {
-	memories, err := s.Memories()
-	if err != nil {
-		return nil, err
-	}
 	counts := make(map[string]int)
-	relatedTo = strings.ToLower(strings.TrimSpace(relatedTo))
-	for _, m := range memories {
-		if relatedTo != "" {
-			found := false
-			for _, t := range m.Topics {
-				if t == relatedTo {
-					found = true
-					break
-				}
+	if relatedTo = normalizeTopic(relatedTo); relatedTo != "" {
+		ids, err := s.edgeIDs(topicEdgesPrefix(relatedTo), false, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			topics, err := s.memoryTopics(id)
+			if err != nil {
+				return nil, err
 			}
-			if !found {
-				continue
+			for _, t := range topics {
+				counts[t]++
 			}
 		}
-		for _, t := range m.Topics {
-			counts[t]++
+	} else {
+		iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: topicPrefix, UpperBound: prefixEnd(topicPrefix)})
+		if err != nil {
+			return nil, err
+		}
+		for iter.First(); iter.Valid(); iter.Next() {
+			counts[string(iter.Key()[len(topicPrefix):])] = int(binary.BigEndian.Uint64(iter.Value()))
+		}
+		if err = errors.Join(iter.Error(), iter.Close()); err != nil {
+			return nil, err
 		}
 	}
 	names := make([]string, 0, len(counts))
@@ -411,11 +604,23 @@ func (s *Store) Topics(relatedTo string) ([][2]string, error) {
 	return out, nil
 }
 
+// normalizeTopic lowercases and trims a topic name and drops control
+// characters, which key layouts rely on topics not containing.
+func normalizeTopic(topic string) string {
+	topic = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, topic)
+	return strings.ToLower(strings.TrimSpace(topic))
+}
+
 func normalizeTopics(topics []string) []string {
 	seen := make(map[string]bool)
 	out := make([]string, 0, len(topics))
 	for _, topic := range topics {
-		topic = strings.ToLower(strings.TrimSpace(topic))
+		topic = normalizeTopic(topic)
 		if topic != "" && !seen[topic] {
 			seen[topic] = true
 			out = append(out, topic)
@@ -423,9 +628,11 @@ func normalizeTopics(topics []string) []string {
 	}
 	return out
 }
+
 func tokenize(text string) []string {
 	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
 }
+
 func prefixEnd(prefix []byte) []byte {
 	end := append([]byte(nil), prefix...)
 	for i := len(end) - 1; i >= 0; i-- {
