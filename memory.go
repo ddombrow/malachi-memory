@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -117,8 +116,17 @@ func (quietLogger) Fatalf(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// lBaseMaxBytes keeps Pebble's base level small. Each read-write open
+// flushes the last call's few keys to a new L0 file, and because postings
+// span the whole key range that file overlaps everything below it. With the
+// default 64 MB base level, a whole store under 64 MB sits in one level, so
+// every second write compacted all of it (31 MB at 100k memories, ~380 ms
+// while holding the lock). A small base level absorbs those writes, so
+// remember costs ~43 ms at any size; search pays ~0.4 ms for the extra level.
+const lBaseMaxBytes = 1 << 20
+
 func (d *Db) open(readOnly bool) (*Store, error) {
-	db, err := pebble.Open(d.path, &pebble.Options{Logger: quietLogger{}, ReadOnly: readOnly})
+	db, err := pebble.Open(d.path, &pebble.Options{Logger: quietLogger{}, ReadOnly: readOnly, LBaseMaxBytes: lBaseMaxBytes})
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +141,7 @@ func (d *Db) open(readOnly bool) (*Store, error) {
 // The database is a small property graph in ordered keys. Graph records are
 // authoritative; nothing else repeats them.
 //
-// Schema v2:
+// Schema v3 (v2 plus the search index, whose p/ and meta/ keys are in index.go):
 //
 //	m/<id>               memory node: JSON {id, text, created}
 //	t/<topic>            topic node: number of memories about it (uint64)
@@ -147,7 +155,7 @@ func (d *Db) open(readOnly bool) (*Store, error) {
 // control characters, so the \x00 after a topic name ends it unambiguously.
 // v1 kept topics in the memory JSON, t/ values were the name, and e/ keys
 // used "/" after the topic; see migrate.go.
-const schemaVersion = 2
+const schemaVersion = 3
 
 var (
 	memoryPrefix  = []byte("m/")
@@ -187,7 +195,7 @@ func (s *Store) checkSchema(readOnly bool) error {
 			// Written before versioning: the v1 layout.
 			return s.migrateV1()
 		}
-		return s.db.Set(schemaVersionKey, uint64Bytes(schemaVersion), pebble.Sync)
+		return s.rebuildIndex() // stamps the versions on a new database
 	}
 	if err != nil {
 		return err
@@ -200,7 +208,12 @@ func (s *Store) checkSchema(readOnly bool) error {
 	closer.Close()
 	switch v {
 	case schemaVersion:
-		return nil
+		return s.checkIndex(readOnly)
+	case 2: // v3 only adds the search index, which is derived
+		if readOnly {
+			return errNeedsMigration
+		}
+		return s.rebuildIndex()
 	case 1:
 		if readOnly {
 			return errNeedsMigration
@@ -300,7 +313,10 @@ func (s *Store) putMemory(batch *pebble.Batch, m memoryRecord, topics []string) 
 			return err
 		}
 	}
-	return nil
+	if err = indexMemory(batch, m.ID, m.Text, topics, m.Created); err != nil {
+		return err
+	}
+	return s.addDocCount(batch, 1)
 }
 
 func putEdge(batch *pebble.Batch, id int64, topic string, pos int) error {
@@ -407,6 +423,12 @@ func (s *Store) Forget(id int64) (bool, error) {
 			return false, err
 		}
 	}
+	if err = unindexMemory(batch, m); err != nil {
+		return false, err
+	}
+	if err = s.addDocCount(batch, -1); err != nil {
+		return false, err
+	}
 	return true, batch.Commit(pebble.Sync)
 }
 
@@ -456,67 +478,6 @@ func (s *Store) scanMemories(reverse bool, visit func(memoryRecord) bool) error 
 		}
 	}
 	return iter.Error()
-}
-
-func (s *Store) Search(query string, limit int) ([]Memory, error) {
-	terms := tokenize(query)
-	if len(terms) == 0 {
-		return nil, nil
-	}
-	memories, err := s.Memories()
-	if err != nil {
-		return nil, err
-	}
-	df := make(map[string]int)
-	for _, m := range memories {
-		seen := map[string]bool{}
-		for _, term := range tokenize(m.Text + " " + strings.Join(m.Topics, " ")) {
-			seen[term] = true
-		}
-		for term := range seen {
-			df[term]++
-		}
-	}
-	type hit struct {
-		memory Memory
-		score  float64
-	}
-	var hits []hit
-	for _, m := range memories {
-		words := tokenize(m.Text + " " + strings.Join(m.Topics, " "))
-		tf := map[string]int{}
-		for _, word := range words {
-			tf[word]++
-		}
-		score := 0.0
-		for _, term := range terms {
-			if tf[term] == 0 {
-				continue
-			}
-			idf := math.Log(1 + (float64(len(memories)-df[term])+0.5)/(float64(df[term])+0.5))
-			score += idf * float64(tf[term]) * 2.2 / (float64(tf[term]) + 1.2*(0.25+0.75*float64(len(words))/80))
-		}
-		if score > 0 {
-			hits = append(hits, hit{m, score})
-		}
-	}
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].score != hits[j].score {
-			return hits[i].score > hits[j].score
-		}
-		if hits[i].memory.Created != hits[j].memory.Created {
-			return hits[i].memory.Created > hits[j].memory.Created
-		}
-		return hits[i].memory.ID > hits[j].memory.ID
-	})
-	if len(hits) > limit {
-		hits = hits[:limit]
-	}
-	out := make([]Memory, len(hits))
-	for i, h := range hits {
-		out[i] = h.memory
-	}
-	return out, nil
 }
 
 // About follows a topic's ABOUT edges, newest memory first. Ids are assigned

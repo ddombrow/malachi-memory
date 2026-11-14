@@ -106,7 +106,7 @@ func TestMigrateV1Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v := rawSchemaVersion(t, path); v != "2" {
+	if v := rawSchemaVersion(t, path); v != fmt.Sprint(schemaVersion) {
 		t.Fatalf("schema after migration = %s", v)
 	}
 	checkMigrated(t, db)
@@ -171,7 +171,7 @@ func TestViewMigrates(t *testing.T) {
 	if err != nil || !strings.HasPrefix(out, "ci (2)\ngo (2)") {
 		t.Fatalf("topics = %q, %v", out, err)
 	}
-	if v := rawSchemaVersion(t, path); v != "2" {
+	if v := rawSchemaVersion(t, path); v != fmt.Sprint(schemaVersion) {
 		t.Fatalf("schema after View = %s", v)
 	}
 }

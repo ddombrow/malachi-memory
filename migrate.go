@@ -57,7 +57,9 @@ func (s *Store) migrateV1() error {
 	}
 	counts := map[string]uint64{}
 	var maxID int64
+	migrated := make([]Memory, 0, len(old))
 	for _, m := range old {
+		migrated = append(migrated, Memory{ID: m.ID, Text: m.Text, Topics: m.Topics, Created: m.Created})
 		encoded, err := json.Marshal(memoryRecord{ID: m.ID, Text: m.Text, Created: m.Created})
 		if err != nil {
 			return err
@@ -85,7 +87,8 @@ func (s *Store) migrateV1() error {
 	if err = batch.Set(nextIDKey, uint64Bytes(max(next, uint64(maxID)+1)), nil); err != nil {
 		return err
 	}
-	if err = batch.Set(schemaVersionKey, uint64Bytes(schemaVersion), nil); err != nil {
+	// Builds the search index and stamps the schema version.
+	if err = writeIndex(batch, migrated); err != nil {
 		return err
 	}
 	if err = batch.Commit(pebble.Sync); err != nil {

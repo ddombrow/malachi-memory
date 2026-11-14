@@ -51,7 +51,11 @@ func seed(b *testing.B, n int) *Db {
 				return "", err
 			}
 		}
-		return "", s.db.Flush()
+		if err := s.db.Flush(); err != nil {
+			return "", err
+		}
+		// Settle the LSM so timed calls don't pay for compacting the seed.
+		return "", s.db.Compact([]byte{0}, []byte{0xff}, true)
 	})
 	if err != nil {
 		b.Fatal(err)

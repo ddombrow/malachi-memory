@@ -3,7 +3,7 @@
 A small Go MCP server (stdio) that keeps notes between agent sessions in an embedded Pebble-backed knowledge graph. Written for [malachi](https://github.com/ddombrow/malachi); any compatible MCP client works.
 
 - Each memory is a node with text and creation time. Topic names are topic nodes; `ABOUT` edges connect memories to topics. Topics that share a memory are related in the graph.
-- Search uses local BM25-style ranking over memory text and topics. No embeddings, LLM, or network access.
+- Search uses BM25 ranking over memory text and topics from an inverted index kept in the same store, rebuilt automatically if it is ever out of date. No embeddings, LLM, or network access.
 - Pebble is the embedded key-value store; graph nodes and edges are stored using prefixed, ordered keys. The database opens around each call so several server processes can take turns sharing the same database.
 - Speaks the existing MCP interface: `server/discover` (`2026-07-28`) and the 2025 `initialize` handshake, over newline-delimited JSON-RPC.
 

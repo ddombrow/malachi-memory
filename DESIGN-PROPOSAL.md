@@ -113,6 +113,24 @@ Replace the current search scan with a derived token-to-memory postings index.
 
 **Exit criteria:** text search examines matching postings rather than scanning every memory, and rebuilding the index produces equivalent results.
 
+### Phase 3 results (2026-11-14)
+
+Done: schema v3 adds an inverted index (`index.go`): `p/<term>\x00<id>` postings holding tf, document length and creation time, plus `meta/doc-count` and `meta/index-version`. Search walks only the query terms' posting lists, keeps the top `limit` in a heap, and reads only those memories. Remember and forget update postings in the same batch as the graph; forget re-tokenizes the memory rather than storing its terms, since memories are immutable.
+
+The index is derived: `rebuildIndex` deletes all postings and rebuilds them from the graph in one batch. It is the v2 -> v3 upgrade (no backup needed; graph keys are untouched, which a test checks), the v1 migration's index step, and what runs when `meta/index-version` differs, so a tokenizer change is a version bump.
+
+Correctness: the old full-scan search is kept in `index_test.go` as a reference, and a randomized test (mixed case, accents, Greek, CJK, digits, repeated terms, tied scores and dates, forgets) requires identical ranked ids. Per-memory scores add the same terms in the same order, so even float rounding agrees; the test catches changing the length constant from 80 to 81 or flipping the id tie-break. A rebuilt index must equal the incrementally maintained one key for key. The MCP golden transcript is unchanged. The fixed average document length of 80 is kept for identical rankings; using the real average is a separate, ranking-visible change.
+
+Write amplification found and fixed: each read-write open flushes the previous call's few keys to a new L0 file, and postings span the whole key range, so that file overlaps everything. With Pebble's default 64 MB base level, a store below that size sat in one level and every second write compacted all of it: 31 MB and ~380 ms at 100k memories, while holding the lock. `LBaseMaxBytes` is now 1 MB, so writes merge into a small base level.
+
+| call | before index | after |
+|---|---|---|
+| recall by query, 1k / 10k / 100k | 5 / 37 / 345 ms | 0.6 / 0.8 / 1.6 ms |
+| remember, 1k / 10k / 100k | 45 / 47 / 103 ms | 46 / 44 / 45 ms |
+| remember at 100k over 1,500 writes | | mean 43, p99 60, max 67 ms |
+
+Every read is now under ~1.5 ms except `topics related_to` at 100k (10 ms), and every write is one read-write open plus a sync (~43 ms).
+
 ## Phase 4: Support multiple agent sessions
 
 Pebble permits one process to own a database at a time. The current open-per-call pattern lets separate MCP processes take turns, but it does not provide simultaneous database access; requests can wait for the database lock.
