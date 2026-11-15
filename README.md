@@ -30,7 +30,7 @@ mkdir -p ~/.local/share/malachi-memory
 
 `install` replaces the binary in place, so running sessions pick it up on their next start; pass `INSTALL_PATH=...` to put it elsewhere. It warns if a different `malachi-memory` comes first on PATH.
 
-Without a clone, `go install github.com/ddombrow/malachi-memory-mcp@latest` also works, but names the binary `malachi-memory-mcp`; use that as `command` below.
+Without a clone, `go install github.com/ddombrow/malachi-memory@latest` also works (it installs to `$(go env GOPATH)/bin`).
 
 `~/.malachi/mcp.json`:
 
