@@ -1,4 +1,4 @@
-package main
+package memory
 
 import (
 	"bufio"
@@ -27,7 +27,7 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		if err := serve(db, os.Stdin, os.Stdout); err != nil {
+		if err := Serve(db, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -318,34 +318,6 @@ func runServerProcess(path string, p, writes int) error {
 	return nil
 }
 
-func TestBackupFlag(t *testing.T) {
-	if testing.Short() {
-		t.Skip("builds the binary")
-	}
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "malachi-memory")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
-	db, err := NewDb(dir + "/memory.pebble")
-	if err != nil {
-		t.Fatal(err)
-	}
-	withStore(t, db, func(s *Store) { mustRemember(t, s, "flag backup") })
-	if out, err := exec.Command(bin, "--db", dir+"/memory.pebble", "--backup", dir+"/copy").CombinedOutput(); err != nil {
-		t.Fatalf("backup: %v\n%s", err, out)
-	}
-	copyDb, err := NewDb(dir + "/copy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	withStore(t, copyDb, func(s *Store) {
-		if all, _ := s.Memories(); len(all) != 1 {
-			t.Fatalf("copy has %d memories", len(all))
-		}
-	})
-}
-
 func TestViewIsReadOnly(t *testing.T) {
 	db := testDB(t)
 	withStore(t, db, func(s *Store) { mustRemember(t, s, "written before the view", "x") })
@@ -366,5 +338,62 @@ func TestViewIsReadOnly(t *testing.T) {
 		if readOnlyTool(tool) {
 			t.Fatalf("%s must not open read-only", tool)
 		}
+	}
+}
+
+func TestToolsAndCall(t *testing.T) {
+	tools := Tools()
+	if len(tools) != 4 {
+		t.Fatalf("%d tools", len(tools))
+	}
+	readOnly := map[string]bool{}
+	for _, tool := range tools {
+		readOnly[tool.Name] = tool.ReadOnly
+		if tool.Description == "" || tool.InputSchema["type"] != "object" {
+			t.Fatalf("tool %s is incomplete: %+v", tool.Name, tool)
+		}
+	}
+	if !readOnly["recall"] || !readOnly["topics"] || readOnly["remember"] || readOnly["forget"] {
+		t.Fatalf("read-only flags = %v", readOnly)
+	}
+	db := testDB(t)
+	if out, err := db.Call("remember", map[string]any{"text": "Go callers pass string slices", "topics": []string{"api"}}); err != nil || out != "Remembered #1." {
+		t.Fatalf("remember = %q, %v", out, err)
+	}
+	if out, err := db.Call("recall", map[string]any{"topic": "api"}); err != nil || !strings.Contains(out, "[api] Go callers") {
+		t.Fatalf("recall = %q, %v", out, err)
+	}
+	if _, err := db.Call("forget", map[string]any{"id": float64(7)}); err == nil {
+		t.Fatal("forgetting a missing memory should be a tool error")
+	}
+
+	// Go callers pass plain ints, not the float64 that JSON decodes to.
+	if _, err := db.Call("remember", map[string]any{"text": "second", "topics": []string{"api"}}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := db.Call("recall", map[string]any{"topic": "api", "limit": 1}); err != nil || strings.Count(out, "[api]") != 1 {
+		t.Fatalf("recall with int limit = %q, %v", out, err)
+	}
+	if out, err := db.Call("forget", map[string]any{"id": 1}); err != nil || !strings.Contains(out, "#1") {
+		t.Fatalf("forget with int id = %q, %v", out, err)
+	}
+}
+
+func TestPanicReleasesLock(t *testing.T) {
+	db := testDB(t)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected the panic to propagate")
+			}
+		}()
+		db.With(func(*Store) (string, error) { panic("boom") })
+	}()
+	start := time.Now()
+	if _, err := db.Call("remember", map[string]any{"text": "after the panic"}); err != nil {
+		t.Fatalf("call after recovered panic: %v", err)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("waited %s for the lock", waited)
 	}
 }

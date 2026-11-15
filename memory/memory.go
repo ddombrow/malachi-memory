@@ -1,4 +1,4 @@
-package main
+package memory
 
 import (
 	"encoding/binary"
@@ -101,15 +101,7 @@ func (d *Db) run(readOnly bool, f func(*Store) (string, error)) (string, error) 
 			continue
 		}
 		if err == nil {
-			result, callErr := f(s)
-			closeErr := s.Close()
-			if callErr != nil {
-				return "", callErr
-			}
-			if closeErr != nil {
-				return "", closeErr
-			}
-			return result, nil
+			return runAndClose(s, f)
 		}
 		if !isLocked(err) {
 			return "", err
@@ -119,6 +111,17 @@ func (d *Db) run(readOnly bool, f func(*Store) (string, error)) (string, error) 
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// runAndClose runs f and closes the store even if f panics, so a program
+// that recovers the panic doesn't leave the database lock held.
+func runAndClose(s *Store, f func(*Store) (string, error)) (result string, err error) {
+	defer func() {
+		if closeErr := s.Close(); err == nil && closeErr != nil {
+			result, err = "", closeErr
+		}
+	}()
+	return f(s)
 }
 
 const lockWait = 5 * time.Second
@@ -135,9 +138,13 @@ func isLocked(err error) bool {
 type quietLogger struct{}
 
 func (quietLogger) Infof(string, ...interface{}) {}
+
+// Fatalf must not return. It panics rather than calling os.Exit, so deferred
+// cleanup runs and the stack shows where Pebble failed. A failure in one of
+// Pebble's background goroutines still ends the process: nothing can recover
+// a panic there.
 func (quietLogger) Fatalf(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "malachi-memory: pebble: "+format+"\n", args...)
-	os.Exit(1)
+	panic(fmt.Sprintf("malachi-memory: pebble: "+format, args...))
 }
 
 // lBaseMaxBytes keeps Pebble's base level small. Each read-write open

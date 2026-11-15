@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/ddombrow/malachi-memory/memory"
 )
 
 func main() {
@@ -14,7 +16,7 @@ func main() {
 	backup := flag.String("backup", "", "write a consistent copy of the database to this new directory and exit")
 	flag.Parse()
 	if *version {
-		fmt.Println("malachi-memory " + serverVersion)
+		fmt.Println("malachi-memory " + memory.Version)
 		return
 	}
 	if dbPath == "" {
@@ -25,7 +27,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "malachi-memory: create database directory: %v\n", err)
 		os.Exit(1)
 	}
-	db, err := NewDb(dbPath)
+	db, err := memory.NewDb(dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "malachi-memory: open %s: %v\n", dbPath, err)
 		os.Exit(1)
@@ -38,7 +40,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "malachi-memory: backed up %s to %s\n", dbPath, *backup)
 		return
 	}
-	if err := serve(db, os.Stdin, os.Stdout); err != nil {
+	if err := memory.Serve(db, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "malachi-memory: serve MCP input: %v\n", err)
 		os.Exit(1)
 	}

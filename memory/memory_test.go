@@ -1,4 +1,4 @@
-package main
+package memory
 
 import (
 	"bytes"
@@ -27,7 +27,7 @@ func withStore(t *testing.T, db *Db, fn func(*Store)) {
 func TestServeReturnsScannerError(t *testing.T) {
 	input := strings.NewReader(strings.Repeat("x", 8*1024*1024+1))
 	var output bytes.Buffer
-	if err := serve(nil, input, &output); err == nil {
+	if err := Serve(nil, input, &output); err == nil {
 		t.Fatal("serve returned nil for an oversized input line")
 	}
 }
@@ -102,7 +102,7 @@ func TestMCPInterface(t *testing.T) {
 		input.WriteByte('\n')
 	}
 	var output bytes.Buffer
-	serve(db, &input, &output)
+	Serve(db, &input, &output)
 	var replies []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
 		var reply map[string]any

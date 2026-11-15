@@ -69,16 +69,28 @@ mv memory.pebble memory.pebble.old
 cp -R backup-2026-11-13 memory.pebble
 ```
 
+## Embedding
+
+The store, the tools and the stdio server live in package `github.com/ddombrow/malachi-memory/memory`; `main.go` only parses flags. A Go agent can run the tools in process instead of starting the server:
+
+```go
+db, err := memory.NewDb(path)
+for _, t := range memory.Tools() { /* register t.Name, t.Description, t.InputSchema; t.ReadOnly calls may run in parallel */ }
+text, err := db.Call("recall", map[string]any{"limit": 20}) // err is a tool error to show the model
+```
+
+Pass `memory.Instructions` on in the system prompt. `Call` opens and closes the database around each call like the server does, so an embedding program and stdio servers can share one database. `db.Backup(dir)` writes a checkpoint.
+
 ## Development
 
 ```sh
-go test ./...                                   # unit, multi-process and MCP baseline tests
-go test -short ./...                            # skip the tests that spawn processes
-go test -run MCPBaseline -update                # accept an intended change to tool output
-go test -run '^$' -bench . -benchtime 20x       # tool latency at 1k, 10k and 100k memories
+go test ./...                                          # unit, multi-process and MCP baseline tests
+go test -short ./...                                   # skip the tests that spawn processes
+go test ./memory -run MCPBaseline -update              # accept an intended change to tool output
+go test ./memory -run '^$' -bench . -benchtime 20x     # tool latency at 1k, 10k and 100k memories
 ```
 
-`testdata/baseline.golden` is the byte-for-byte record of the MCP interface; a diff there is a change clients will see.
+`memory/testdata/baseline.golden` is the byte-for-byte record of the MCP interface; a diff there is a change clients will see.
 
 ## License
 

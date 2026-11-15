@@ -1,4 +1,4 @@
-package main
+package memory
 
 import (
 	"bytes"
@@ -23,7 +23,7 @@ func TestMCPBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	serve(testDB(t), bytes.NewReader(input), &output)
+	Serve(testDB(t), bytes.NewReader(input), &output)
 	if *update {
 		if err = os.WriteFile("testdata/baseline.golden", output.Bytes(), 0o644); err != nil {
 			t.Fatal(err)
