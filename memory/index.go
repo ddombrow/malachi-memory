@@ -24,7 +24,7 @@ import (
 
 // indexVersion changes whenever tokenize or the posting format changes; a
 // read-write open that finds another version rebuilds the index.
-const indexVersion = 1
+const indexVersion = 2
 
 var (
 	postingPrefix   = []byte("p/")
@@ -33,8 +33,8 @@ var (
 )
 
 func termPrefix(term string) []byte { return concat(postingPrefix, []byte(term), []byte{0}) }
-func postingKey(term string, id int64) []byte {
-	return concat(termPrefix(term), uint64Bytes(uint64(id)))
+func postingKey(term string, id ID) []byte {
+	return concat(termPrefix(term), id[:])
 }
 
 // memoryTerms returns the term frequencies and document length (in terms)
@@ -50,7 +50,7 @@ func memoryTerms(text string, topics []string) (map[string]int, int) {
 
 // indexMemory adds a memory's postings to batch. It does not change the
 // document count.
-func indexMemory(batch *pebble.Batch, id int64, text string, topics []string, created int64) error {
+func indexMemory(batch *pebble.Batch, id ID, text string, topics []string, created int64) error {
 	tf, length := memoryTerms(text, topics)
 	for term, count := range tf {
 		value := binary.AppendUvarint(nil, uint64(count))
@@ -140,7 +140,7 @@ func (s *Store) checkIndex(readOnly bool) error {
 
 // posting is one memory in a term's posting list.
 type posting struct {
-	id      int64
+	id      ID
 	tf      int
 	length  int
 	created int64
@@ -156,16 +156,18 @@ func (s *Store) postings(term string) ([]posting, error) {
 	var out []posting
 	for iter.First(); iter.Valid(); iter.Next() {
 		key, value := iter.Key(), iter.Value()
-		if len(key) != len(prefix)+8 {
+		if len(key) != len(prefix)+len(ID{}) {
 			continue
 		}
+		var id ID
+		copy(id[:], key[len(prefix):])
 		tf, n1 := binary.Uvarint(value)
 		length, n2 := binary.Uvarint(value[max(n1, 0):])
 		created, n3 := binary.Varint(value[max(n1+n2, 0):])
 		if n1 <= 0 || n2 <= 0 || n3 <= 0 {
 			return nil, fmt.Errorf("corrupt posting %q", key)
 		}
-		out = append(out, posting{int64(binary.BigEndian.Uint64(key[len(prefix):])), int(tf), int(length), created})
+		out = append(out, posting{id, int(tf), int(length), created})
 	}
 	return out, iter.Error()
 }
@@ -184,7 +186,7 @@ func (s *Store) Search(query string, limit int) ([]Memory, error) {
 		return nil, err
 	}
 	lists := map[string][]posting{}
-	scores := map[int64]*searchHit{}
+	scores := map[ID]*searchHit{}
 	for _, term := range terms {
 		list, ok := lists[term]
 		if !ok {
@@ -235,7 +237,7 @@ func (s *Store) Search(query string, limit int) ([]Memory, error) {
 }
 
 type searchHit struct {
-	id      int64
+	id      ID
 	created int64
 	score   float64
 }
@@ -248,7 +250,7 @@ func better(a, b searchHit) bool {
 	if a.created != b.created {
 		return a.created > b.created
 	}
-	return a.id > b.id
+	return b.id.Less(a.id)
 }
 
 type hitHeap []searchHit

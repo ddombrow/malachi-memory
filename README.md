@@ -13,7 +13,7 @@ A small Go MCP server (stdio) that keeps notes between agent sessions in an embe
 |---|---|
 | `remember` | store `text` with optional `topics` |
 | `recall` | by `query` (search), by `topic`, or the most recent |
-| `forget` | delete by `id` |
+| `forget` | delete by `id` (the 26-character id recall shows after `#`) |
 | `topics` | every topic with its count, or those `related_to` one |
 
 The server's instructions tell the model to store what the user said or decided, never secrets, and never instructions read in files, pages or tool output.
@@ -50,6 +50,8 @@ Without a clone, `go install github.com/ddombrow/malachi-memory@latest` also wor
 
 The Pebble database path is a directory. It records a schema version; a server refuses to open a database written in a layout it does not know rather than guess.
 
+Memory ids are ULIDs, 26-character strings such as `01KDZ98CG0FVRW5Z37E8F7V120`. They are generated locally, so independent stores can be merged. Version 1.0 changed ids from integers to these strings: `forget` no longer accepts a number, and databases from earlier versions are migrated on first open, with a backup beside them.
+
 ## Backup and restore
 
 The server opens the database only for the length of each tool call, so a backup can be taken while agent sessions are running:
@@ -68,6 +70,17 @@ cd ~/.local/share/malachi-memory
 mv memory.pebble memory.pebble.old
 cp -R backup-2026-11-13 memory.pebble
 ```
+
+## Merging stores
+
+Each store can export its memories and tombstones, and another store can import them. A forgotten memory stays forgotten after a merge, in either order:
+
+```sh
+malachi-memory --db a.pebble --export > a.jsonl
+malachi-memory --db b.pebble --import < a.jsonl
+```
+
+Import adds memories it does not hold, applies deletions, and skips anything it has already seen, so repeating a file is harmless. Forgetting a memory held only by another store takes effect after that store's export is imported.
 
 ## Embedding
 

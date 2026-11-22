@@ -172,6 +172,27 @@ When adding a relationship:
 
 **Exit criteria:** every relationship type supports a real user-facing query or workflow.
 
+## Phase 6: Global ids and tombstones for replication
+
+Done (version 1.0.0). This breaks the tool contract, so it ships as a major version.
+
+Decisions as built:
+
+- **Ids are ULIDs.** A 16-byte id: 48-bit millisecond timestamp, 80 random bits, written as 26 Crockford base32 characters. Ids are generated locally and sort by creation time. There is no counter (`meta/next-id` is gone).
+- **Ids are strings in the tool contract.** `remember` returns the id, and `forget` takes it as a string. Numbers are rejected.
+- **`created` stays in the record.** It is user-visible and need not match the id's timestamp for migrated data.
+- **Forget writes a tombstone.** `x/<id>` = `{deleted_at}`. In one batch it deletes the memory node, its edges, its postings, and any topic count it empties. A memory is live iff it has a record and no tombstone. Ids are never reused.
+- **Tombstones never expire.** Garbage collection waits until store size makes it matter.
+- **Merge rules.** A memory is added unless its id has a tombstone or is already present. A tombstone deletes the memory if held, and is kept. When two replicas tombstone the same id at different times, the earlier `deleted_at` is kept, so every merge order stores the same bytes. Topic counts and the doc count are recomputed as memories and tombstones are applied, not replicated.
+- **Unknown ids are rejected locally.** Forgetting a memory held only by another store takes effect after that store's export is imported.
+- **Sync** is `--export` and `--import`: newline-delimited JSON of memories (with topics) and tombstones. Each import line commits on its own, and repeating an import changes nothing. No daemon.
+- **Migration from v1, v2 and v3.** Each old integer id becomes an id from creation time, the old number, and the first four bytes of a SHA-256 over the creation time, number, text and topics. Stores that numbered a memory #1 in the same second therefore do not collide on merge. No alias is kept. The old database is checkpointed first, as in earlier migrations.
+- **Edits are out of scope.** Memories stay immutable.
+
+Limits: convergence only. Contradictory memories are both kept, and forget is eventually consistent across replicas.
+
+**Exit criteria, met:** migration tests on v1, v2 and v3 data; merge tests for both delivery orders, duplicate delivery, tombstone-before-memory, and concurrent forgets; export/import round trip; colliding migrated stores both survive a merge.
+
 ## Suggested order
 
 1. Establish tests, backups, and performance baselines.
@@ -179,6 +200,7 @@ When adding a relationship:
 3. Add a rebuildable inverted search index.
 4. Measure multi-session lock contention; add a local Pebble-owning service only if needed.
 5. Add typed relationships when a concrete feature calls for them.
+6. Switch to global ids and tombstones (major version bump) before any multi-store sync.
 
 ## Risks and tradeoffs
 

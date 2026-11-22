@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,7 +20,7 @@ import (
 // Memory is a memory node with the topics its ABOUT edges point to, in the
 // order they were given.
 type Memory struct {
-	ID      int64    `json:"id"`
+	ID      ID       `json:"id"`
 	Text    string   `json:"text"`
 	Topics  []string `json:"topics"`
 	Created int64    `json:"created"`
@@ -65,6 +66,21 @@ func ensurePrivateDir(path string) error {
 		return fmt.Errorf("database path %q is not a directory", path)
 	}
 	return os.Chmod(path, 0o700)
+}
+
+// Export writes the database as a sync stream (see sync.go).
+func (d *Db) Export(w io.Writer) error {
+	_, err := d.View(func(s *Store) (string, error) { return "", s.Export(w) })
+	return err
+}
+
+// Import merges a sync stream into the database and reports what changed.
+func (d *Db) Import(r io.Reader) (added, deleted int, err error) {
+	_, err = d.With(func(s *Store) (string, error) {
+		added, deleted, err = s.Import(r)
+		return "", err
+	})
+	return added, deleted, err
 }
 
 // Backup writes a consistent copy of the database to dir, which must not
@@ -172,28 +188,29 @@ func (d *Db) open(readOnly bool) (*Store, error) {
 // The database is a small property graph in ordered keys. Graph records are
 // authoritative; nothing else repeats them.
 //
-// Schema v3 (v2 plus the search index, whose p/ and meta/ keys are in index.go):
+// Schema v4 (v3 with ULID memory ids, plus tombstones; the search index, whose
+// p/ and meta/ keys are in index.go, is derived):
 //
 //	m/<id>               memory node: JSON {id, text, created}
 //	t/<topic>            topic node: number of memories about it (uint64)
 //	e/<topic>\x00<id>    ABOUT edge, topic -> memory (empty value)
 //	r/<id><topic>        ABOUT edge, memory -> topic: its position (uint64)
-//	meta/next-id         next memory id (uint64)
+//	x/<id>               tombstone of a forgotten memory: JSON {deleted_at}
 //	meta/schema-version  schema version (uint64)
 //
-// Ids are big-endian uint64s, so memories iterate oldest first and the
-// edges of one topic or one memory are contiguous. Topic names cannot contain
+// Ids are 16 bytes (see id.go), so memories iterate oldest first and the edges
+// of one topic or one memory are contiguous. Topic names cannot contain
 // control characters, so the \x00 after a topic name ends it unambiguously.
-// v1 kept topics in the memory JSON, t/ values were the name, and e/ keys
-// used "/" after the topic; see migrate.go.
-const schemaVersion = 3
+// Tombstones never expire: an id is never reused, so a deleted memory cannot
+// come back when stores are merged (see sync.go).
+const schemaVersion = 4
 
 var (
-	memoryPrefix  = []byte("m/")
-	topicPrefix   = []byte("t/")
-	edgePrefix    = []byte("e/")
-	reversePrefix = []byte("r/")
-	nextIDKey     = []byte("meta/next-id")
+	memoryPrefix    = []byte("m/")
+	topicPrefix     = []byte("t/")
+	edgePrefix      = []byte("e/")
+	reversePrefix   = []byte("r/")
+	tombstonePrefix = []byte("x/")
 
 	schemaVersionKey = []byte("meta/schema-version")
 )
@@ -203,9 +220,14 @@ var now = time.Now
 
 // memoryRecord is the stored form of a memory node.
 type memoryRecord struct {
-	ID      int64  `json:"id"`
+	ID      ID     `json:"id"`
 	Text    string `json:"text"`
 	Created int64  `json:"created"`
+}
+
+// tombstoneRecord is the stored form of a forgotten memory's tombstone.
+type tombstoneRecord struct {
+	DeletedAt int64 `json:"deleted_at"`
 }
 
 // errNeedsMigration means a read-only open found a database that must be
@@ -240,11 +262,12 @@ func (s *Store) checkSchema(readOnly bool) error {
 	switch v {
 	case schemaVersion:
 		return s.checkIndex(readOnly)
-	case 2: // v3 only adds the search index, which is derived
+	case 3, 2:
+		// Both keep integer ids; v4 replaces them with ULIDs and adds tombstones.
 		if readOnly {
 			return errNeedsMigration
 		}
-		return s.rebuildIndex()
+		return s.migrateV3(v)
 	case 1:
 		if readOnly {
 			return errNeedsMigration
@@ -280,45 +303,37 @@ func concat(parts ...[]byte) []byte {
 	return out
 }
 
-func memoryKey(id int64) []byte    { return concat(memoryPrefix, uint64Bytes(uint64(id))) }
+func memoryKey(id ID) []byte       { return concat(memoryPrefix, id[:]) }
 func topicKey(topic string) []byte { return concat(topicPrefix, []byte(topic)) }
+func tombstoneKey(id ID) []byte    { return concat(tombstonePrefix, id[:]) }
 func topicEdgesPrefix(topic string) []byte {
 	return concat(edgePrefix, []byte(topic), []byte{0})
 }
-func edgeKey(topic string, id int64) []byte {
-	return concat(topicEdgesPrefix(topic), uint64Bytes(uint64(id)))
+func edgeKey(topic string, id ID) []byte {
+	return concat(topicEdgesPrefix(topic), id[:])
 }
-func memoryEdgesPrefix(id int64) []byte { return concat(reversePrefix, uint64Bytes(uint64(id))) }
-func reverseKey(id int64, topic string) []byte {
+func memoryEdgesPrefix(id ID) []byte { return concat(reversePrefix, id[:]) }
+func reverseKey(id ID, topic string) []byte {
 	return concat(memoryEdgesPrefix(id), []byte(topic))
 }
 
-func (s *Store) Remember(text string, topics []string) (int64, error) {
+func (s *Store) Remember(text string, topics []string) (ID, error) {
 	return s.remember(text, topics, now().Unix(), pebble.Sync)
 }
 
-func (s *Store) remember(text string, topics []string, created int64, opts *pebble.WriteOptions) (int64, error) {
+func (s *Store) remember(text string, topics []string, created int64, opts *pebble.WriteOptions) (ID, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return 0, errors.New("text is empty")
+		return ID{}, errors.New("text is empty")
 	}
 	topics = normalizeTopics(topics)
-	id, err := s.getUint(nextIDKey)
-	if err != nil {
-		return 0, err
-	}
-	if id == 0 {
-		id = 1
-	}
+	id := newID(created)
 	batch := s.db.NewBatch()
 	defer batch.Close()
-	if err = s.putMemory(batch, memoryRecord{ID: int64(id), Text: text, Created: created}, topics); err != nil {
-		return 0, err
+	if err := s.putMemory(batch, memoryRecord{ID: id, Text: text, Created: created}, topics); err != nil {
+		return ID{}, err
 	}
-	if err = batch.Set(nextIDKey, uint64Bytes(id+1), nil); err != nil {
-		return 0, err
-	}
-	return int64(id), batch.Commit(opts)
+	return id, batch.Commit(opts)
 }
 
 // putMemory adds a memory node with ABOUT edges to normalized topics. Topic
@@ -350,7 +365,7 @@ func (s *Store) putMemory(batch *pebble.Batch, m memoryRecord, topics []string) 
 	return s.addDocCount(batch, 1)
 }
 
-func putEdge(batch *pebble.Batch, id int64, topic string, pos int) error {
+func putEdge(batch *pebble.Batch, id ID, topic string, pos int) error {
 	if err := batch.Set(edgeKey(topic, id), nil, nil); err != nil {
 		return err
 	}
@@ -373,7 +388,7 @@ func (s *Store) getUint(key []byte) (uint64, error) {
 	return binary.BigEndian.Uint64(value), nil
 }
 
-func (s *Store) Get(id int64) (*Memory, error) {
+func (s *Store) Get(id ID) (*Memory, error) {
 	value, closer, err := s.db.Get(memoryKey(id))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, nil
@@ -395,7 +410,7 @@ func (s *Store) Get(id int64) (*Memory, error) {
 }
 
 // memoryTopics follows a memory's ABOUT edges, in the order they were given.
-func (s *Store) memoryTopics(id int64) ([]string, error) {
+func (s *Store) memoryTopics(id ID) ([]string, error) {
 	prefix := memoryEdgesPrefix(id)
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
@@ -423,27 +438,37 @@ func sortedTopics(edges []topicEdge) []string {
 	return out
 }
 
-// Forget deletes a memory node and its edges, and any topic left with none.
-func (s *Store) Forget(id int64) (bool, error) {
+// Forget deletes a memory and leaves a tombstone, so the id stays deleted when
+// stores are merged.
+func (s *Store) Forget(id ID) (bool, error) {
 	m, err := s.Get(id)
 	if err != nil || m == nil {
 		return false, err
 	}
 	batch := s.db.NewBatch()
 	defer batch.Close()
-	if err = batch.Delete(memoryKey(id), nil); err != nil {
+	if err = s.deleteMemory(batch, m, now().Unix()); err != nil {
 		return false, err
 	}
+	return true, batch.Commit(pebble.Sync)
+}
+
+// deleteMemory adds to batch the removal of a memory's node, edges, topic
+// counts and postings, and writes its tombstone.
+func (s *Store) deleteMemory(batch *pebble.Batch, m *Memory, deletedAt int64) error {
+	if err := batch.Delete(memoryKey(m.ID), nil); err != nil {
+		return err
+	}
 	for _, topic := range m.Topics {
-		if err = batch.Delete(edgeKey(topic, id), nil); err != nil {
-			return false, err
+		if err := batch.Delete(edgeKey(topic, m.ID), nil); err != nil {
+			return err
 		}
-		if err = batch.Delete(reverseKey(id, topic), nil); err != nil {
-			return false, err
+		if err := batch.Delete(reverseKey(m.ID, topic), nil); err != nil {
+			return err
 		}
 		count, err := s.getUint(topicKey(topic))
 		if err != nil {
-			return false, err
+			return err
 		}
 		if count <= 1 {
 			err = batch.Delete(topicKey(topic), nil)
@@ -451,30 +476,89 @@ func (s *Store) Forget(id int64) (bool, error) {
 			err = batch.Set(topicKey(topic), uint64Bytes(count-1), nil)
 		}
 		if err != nil {
-			return false, err
+			return err
 		}
 	}
-	if err = unindexMemory(batch, m); err != nil {
-		return false, err
+	if err := unindexMemory(batch, m); err != nil {
+		return err
 	}
-	if err = s.addDocCount(batch, -1); err != nil {
-		return false, err
+	if err := s.addDocCount(batch, -1); err != nil {
+		return err
 	}
-	return true, batch.Commit(pebble.Sync)
+	return putTombstone(batch, m.ID, deletedAt)
+}
+
+// putTombstone records that the memory with id was deleted at deletedAt.
+func putTombstone(batch *pebble.Batch, id ID, deletedAt int64) error {
+	tombstone, err := json.Marshal(tombstoneRecord{DeletedAt: deletedAt})
+	if err != nil {
+		return err
+	}
+	return batch.Set(tombstoneKey(id), tombstone, nil)
+}
+
+// hasTombstone reports whether the memory with id was forgotten.
+func (s *Store) hasTombstone(id ID) (bool, error) {
+	t, err := s.tombstoneTime(id)
+	return t != nil, err
+}
+
+// tombstoneTime returns when the memory with id was forgotten, or nil if it
+// has no tombstone.
+func (s *Store) tombstoneTime(id ID) (*int64, error) {
+	value, closer, err := s.db.Get(tombstoneKey(id))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var r tombstoneRecord
+	err = json.Unmarshal(value, &r)
+	closer.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read tombstone %s: %w", id, err)
+	}
+	return &r.DeletedAt, nil
+}
+
+// Tombstones returns every forgotten memory's id with the time it was deleted.
+func (s *Store) Tombstones() (map[ID]int64, error) {
+	out := map[ID]int64{}
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: tombstonePrefix, UpperBound: prefixEnd(tombstonePrefix)})
+	if err != nil {
+		return nil, err
+	}
+	for iter.First(); iter.Valid(); iter.Next() {
+		var id ID
+		if len(iter.Key()) != len(tombstonePrefix)+len(id) {
+			iter.Close()
+			return nil, fmt.Errorf("corrupt tombstone key %q", iter.Key())
+		}
+		copy(id[:], iter.Key()[len(tombstonePrefix):])
+		var r tombstoneRecord
+		if err = json.Unmarshal(iter.Value(), &r); err != nil {
+			iter.Close()
+			return nil, fmt.Errorf("read tombstone %s: %w", id, err)
+		}
+		out[id] = r.DeletedAt
+	}
+	return out, errors.Join(iter.Error(), iter.Close())
 }
 
 // Memories returns every memory, oldest first, reading the memory nodes and
 // the memory -> topic edges in two ordered scans.
 func (s *Store) Memories() ([]Memory, error) {
-	topics := map[int64][]topicEdge{}
+	topics := map[ID][]topicEdge{}
 	edges, err := s.db.NewIter(&pebble.IterOptions{LowerBound: reversePrefix, UpperBound: prefixEnd(reversePrefix)})
 	if err != nil {
 		return nil, err
 	}
 	for edges.First(); edges.Valid(); edges.Next() {
 		key := edges.Key()[len(reversePrefix):]
-		id := int64(binary.BigEndian.Uint64(key[:8]))
-		topics[id] = append(topics[id], topicEdge{string(key[8:]), binary.BigEndian.Uint64(edges.Value())})
+		var id ID
+		copy(id[:], key[:len(id)])
+		topics[id] = append(topics[id], topicEdge{string(key[len(id):]), binary.BigEndian.Uint64(edges.Value())})
 	}
 	if err = errors.Join(edges.Error(), edges.Close()); err != nil {
 		return nil, err
@@ -533,7 +617,7 @@ func (s *Store) About(topic string, limit int) ([]Memory, error) {
 }
 
 // edgeIDs lists the memory ids at the end of a topic's edges; limit 0 means all.
-func (s *Store) edgeIDs(prefix []byte, reverse bool, limit int) ([]int64, error) {
+func (s *Store) edgeIDs(prefix []byte, reverse bool, limit int) ([]ID, error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
 		return nil, err
@@ -543,10 +627,12 @@ func (s *Store) edgeIDs(prefix []byte, reverse bool, limit int) ([]int64, error)
 	if reverse {
 		valid, step = iter.Last(), iter.Prev
 	}
-	var ids []int64
+	var ids []ID
 	for ; valid && (limit == 0 || len(ids) < limit); valid = step() {
-		if key := iter.Key(); len(key) == len(prefix)+8 {
-			ids = append(ids, int64(binary.BigEndian.Uint64(key[len(prefix):])))
+		if key := iter.Key(); len(key) == len(prefix)+len(ID{}) {
+			var id ID
+			copy(id[:], key[len(prefix):])
+			ids = append(ids, id)
 		}
 	}
 	return ids, iter.Error()

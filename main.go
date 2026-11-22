@@ -14,7 +14,13 @@ func main() {
 	flag.StringVar(&dbPath, "db", dbPath, "path to Pebble database (or MEMORY_DB_PATH)")
 	version := flag.Bool("version", false, "print version")
 	backup := flag.String("backup", "", "write a consistent copy of the database to this new directory and exit")
+	export := flag.Bool("export", false, "write every memory and tombstone to stdout as a sync stream and exit")
+	importFrom := flag.Bool("import", false, "merge a sync stream from stdin into the database and exit")
 	flag.Parse()
+	if *backup != "" && (*export || *importFrom) || *export && *importFrom {
+		fmt.Fprintln(os.Stderr, "malachi-memory: choose one of --backup, --export or --import")
+		os.Exit(2)
+	}
 	if *version {
 		fmt.Println("malachi-memory " + memory.Version)
 		return
@@ -31,6 +37,22 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "malachi-memory: open %s: %v\n", dbPath, err)
 		os.Exit(1)
+	}
+	if *export {
+		if err := db.Export(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "malachi-memory: export: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *importFrom {
+		added, deleted, err := db.Import(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "malachi-memory: import: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "malachi-memory: imported %d memories, %d deleted\n", added, deleted)
+		return
 	}
 	if *backup != "" {
 		if err := db.Backup(*backup); err != nil {

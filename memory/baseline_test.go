@@ -3,10 +3,22 @@ package memory
 import (
 	"bytes"
 	"flag"
+	"io"
 	"os"
 	"testing"
 	"time"
 )
+
+// repeatingReader yields 1, 2, 3, ... so every test id is the same run to run.
+type repeatingReader struct{ n byte }
+
+func (r *repeatingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		r.n++
+		p[i] = r.n
+	}
+	return len(p), nil
+}
 
 var update = flag.Bool("update", false, "rewrite testdata golden files")
 
@@ -17,6 +29,11 @@ func TestMCPBaseline(t *testing.T) {
 	defer func(old func() time.Time) { now = old }(now)
 	clock := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Unix()
 	now = func() time.Time { clock += 86400; return time.Unix(clock, 0) }
+	// Ids are random, so the transcript uses a fixed byte stream and starts the
+	// same-millisecond counter from nothing.
+	defer func(old io.Reader, ms uint64, last ID) { randomSource, lastMS, lastID = old, ms, last }(randomSource, lastMS, lastID)
+	randomSource = &repeatingReader{}
+	lastMS, lastID = 0, ID{}
 
 	input, err := os.ReadFile("testdata/baseline.requests.jsonl")
 	if err != nil {

@@ -37,6 +37,9 @@ func rawSchemaVersion(t *testing.T, path string) string {
 	return fmt.Sprint(value[7])
 }
 
+// checkMigrated checks the v1 fixture after migration. Ids are derived from
+// each memory's creation time and its old number, so the old number is
+// recovered from the id to match memories with the v1 data.
 func checkMigrated(t *testing.T, db *Db) {
 	t.Helper()
 	withStore(t, db, func(s *Store) {
@@ -45,7 +48,7 @@ func checkMigrated(t *testing.T, db *Db) {
 			t.Fatal(err)
 		}
 		want := []struct {
-			id     int64
+			old    int64
 			text   string
 			topics []string
 		}{
@@ -58,13 +61,19 @@ func checkMigrated(t *testing.T, db *Db) {
 		if len(all) != len(want) {
 			t.Fatalf("%d memories after migration, want %d: %v", len(all), len(want), all)
 		}
+		byOld := map[int64]ID{}
 		for i, w := range want {
 			m := all[i]
-			if m.ID != w.id || m.Text != w.text || !slices.Equal(m.Topics, w.topics) || m.Created == 0 {
+			if m.Text != w.text || !slices.Equal(m.Topics, w.topics) || m.Created == 0 {
 				t.Fatalf("memory %d = %+v, want %+v", i, m, w)
 			}
+			want, err := legacyID(m.Created, w.old, m.Text, m.Topics)
+			if err != nil || m.ID != want {
+				t.Fatalf("memory %q has id %s, want legacy id %s for #%d (%v)", m.Text, m.ID, want, w.old, err)
+			}
+			byOld[w.old] = m.ID
 		}
-		about := func(topic string) (ids []int64) {
+		about := func(topic string) (ids []ID) {
 			found, err := s.About(topic, 10)
 			if err != nil {
 				t.Fatal(err)
@@ -75,10 +84,10 @@ func checkMigrated(t *testing.T, db *Db) {
 			return ids
 		}
 		// In v1, "e/ci/" also matched the keys of topic "ci/cd".
-		if got := about("ci"); !slices.Equal(got, []int64{6, 2}) {
+		if got := about("ci"); !slices.Equal(got, []ID{byOld[6], byOld[2]}) {
 			t.Fatalf("about ci = %v", got)
 		}
-		if got := about("ci/cd"); !slices.Equal(got, []int64{2}) {
+		if got := about("ci/cd"); !slices.Equal(got, []ID{byOld[2]}) {
 			t.Fatalf("about ci/cd = %v", got)
 		}
 		if got := about("scratch"); len(got) != 0 {
@@ -91,8 +100,10 @@ func checkMigrated(t *testing.T, db *Db) {
 		if got := fmt.Sprint(topics); got != "[[ci 2] [go 2] [alpha 1] [ci/cd 1] [git 1] [testing 1] [zeta 1]]" {
 			t.Fatalf("topics = %s (orphaned v1 topic nodes must be dropped)", got)
 		}
-		if id := mustRemember(t, s, "after migration", "go"); id != 7 {
-			t.Fatalf("next id = %d, want 7", id)
+		// New memories sort after the migrated ones and are not legacy ids.
+		next := mustRemember(t, s, "after migration", "go")
+		if !all[len(all)-1].ID.Less(next) {
+			t.Fatalf("new id %s does not follow migrated %s", next, all[len(all)-1].ID)
 		}
 	})
 }

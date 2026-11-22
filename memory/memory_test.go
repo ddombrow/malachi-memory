@@ -34,7 +34,7 @@ func TestServeReturnsScannerError(t *testing.T) {
 
 func TestKnowledgeGraphOperations(t *testing.T) {
 	db := testDB(t)
-	var first, second int64
+	var first, second ID
 	withStore(t, db, func(s *Store) {
 		var err error
 		first, err = s.Remember("Prefers table-driven tests in Go", []string{"Testing", "Go", "go"})
@@ -93,7 +93,7 @@ func TestMCPInterface(t *testing.T) {
 		{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": map[string]any{"name": "remember", "arguments": map[string]any{"text": "Prefers tabs", "topics": []any{"style"}}}},
 		{"jsonrpc": "2.0", "method": "notifications/initialized"},
 		{"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": map[string]any{"name": "recall", "arguments": map[string]any{"topic": "style"}}},
-		{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": map[string]any{"name": "forget", "arguments": map[string]any{"id": 999}}},
+		{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": map[string]any{"name": "forget", "arguments": map[string]any{"id": ID{15: 9}.String()}}},
 	}
 	var input bytes.Buffer
 	for _, request := range requests {

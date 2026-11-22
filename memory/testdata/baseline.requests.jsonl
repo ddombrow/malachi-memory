@@ -17,8 +17,8 @@
 {"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"recall","arguments":{"query":"nothing matches this"}}}
 {"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"topics","arguments":{}}}
 {"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"topics","arguments":{"related_to":"GO"}}}
-{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"forget","arguments":{"id":1}}}
-{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"forget","arguments":{"id":1}}}
+{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"forget","arguments":{"id":"01KDZ98CG0041061050R3GG28A"}}}
+{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"forget","arguments":{"id":"01KDZ98CG0041061050R3GG28A"}}}
 {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"forget","arguments":{}}}
 {"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"topics","arguments":{}}}
 {"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"nope","arguments":{}}}

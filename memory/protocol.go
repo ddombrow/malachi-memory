@@ -10,7 +10,7 @@ import (
 )
 
 // Version is reported by --version and in serverInfo.
-const Version = "0.3.0"
+const Version = "1.0.0"
 
 const modern = "2026-07-28"
 
@@ -129,7 +129,7 @@ func toolDefinitions() []map[string]any {
 	return []map[string]any{
 		{"name": "remember", "description": "Store a durable fact, preference or decision, in one or two plain sentences, with topics to find it by (e.g. a project name, a language, \"testing\"). Check recall first so the same fact is not stored twice.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string", "description": "The memory, self-contained"}, "topics": map[string]any{"type": "array", "items": map[string]string{"type": "string"}, "description": "Short topic names, lowercase"}}, "required": []string{"text"}}},
 		{"name": "recall", "description": "Find memories: by search words (query), by topic, or, with neither, the most recent.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]string{"type": "string", "description": "Words to search for"}, "topic": map[string]string{"type": "string", "description": "A topic name"}, "limit": limit}}, "annotations": readOnly},
-		{"name": "forget", "description": "Delete a memory by its id (the #number recall shows), when it is wrong or out of date.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"id": map[string]string{"type": "integer"}}, "required": []string{"id"}}, "annotations": map[string]any{"destructiveHint": true}},
+		{"name": "forget", "description": "Delete a memory by its id (the id after # that recall shows), when it is wrong or out of date.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"id": map[string]string{"type": "string", "description": "The memory id recall shows after #"}}, "required": []string{"id"}}, "annotations": map[string]any{"destructiveHint": true}},
 		{"name": "topics", "description": "List topics with how many memories each has; with related_to, the topics that share memories with that one.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"related_to": map[string]string{"type": "string"}}}, "annotations": readOnly},
 	}
 }
@@ -250,7 +250,7 @@ func callTool(s *Store, name string, args map[string]any) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Remembered #%d.", id), nil
+		return fmt.Sprintf("Remembered #%s.", id), nil
 	case "recall":
 		var found []Memory
 		var err error
@@ -273,19 +273,29 @@ func callTool(s *Store, name string, args map[string]any) (string, error) {
 		}
 		return strings.Join(lines, "\n"), nil
 	case "forget":
-		value, ok := numberArg(args["id"])
-		if !ok {
+		if args["id"] == nil {
 			return "", fmt.Errorf("id is required")
 		}
-		id := int64(value)
+		raw, isString := args["id"].(string)
+		if !isString {
+			return "", fmt.Errorf("id must be a string, as recall shows it")
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return "", fmt.Errorf("id is required")
+		}
+		id, err := ParseID(raw)
+		if err != nil {
+			return "", fmt.Errorf("id: %w", err)
+		}
 		deleted, err := s.Forget(id)
 		if err != nil {
 			return "", err
 		}
 		if !deleted {
-			return "", fmt.Errorf("There is no memory #%d.", id)
+			return "", fmt.Errorf("There is no memory #%s.", id)
 		}
-		return fmt.Sprintf("Forgot #%d.", id), nil
+		return fmt.Sprintf("Forgot #%s.", id), nil
 	case "topics":
 		topics, err := s.Topics(stringArg("related_to"))
 		if err != nil {
@@ -309,5 +319,5 @@ func showMemory(m Memory) string {
 	if len(m.Topics) > 0 {
 		topics = " [" + strings.Join(m.Topics, ", ") + "]"
 	}
-	return fmt.Sprintf("#%d (%s)%s %s", m.ID, time.Unix(m.Created, 0).UTC().Format("2006-01-02"), topics, m.Text)
+	return fmt.Sprintf("#%s (%s)%s %s", m.ID, time.Unix(m.Created, 0).UTC().Format("2006-01-02"), topics, m.Text)
 }

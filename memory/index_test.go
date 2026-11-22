@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"bytes"
 	"fmt"
 	"maps"
 	"math"
@@ -19,7 +18,7 @@ import (
 
 // scanSearch is the search that ran before the index: BM25 over every
 // memory. It is the reference the index must match exactly.
-func scanSearch(memories []Memory, query string, limit int) []int64 {
+func scanSearch(memories []Memory, query string, limit int) []ID {
 	terms := tokenize(query)
 	if len(terms) == 0 {
 		return nil
@@ -64,22 +63,22 @@ func scanSearch(memories []Memory, query string, limit int) []int64 {
 		if hits[i].memory.Created != hits[j].memory.Created {
 			return hits[i].memory.Created > hits[j].memory.Created
 		}
-		return hits[i].memory.ID > hits[j].memory.ID
+		return hits[j].memory.ID.Less(hits[i].memory.ID)
 	})
-	var ids []int64
+	var ids []ID
 	for i := 0; i < len(hits) && i < limit; i++ {
 		ids = append(ids, hits[i].memory.ID)
 	}
 	return ids
 }
 
-func searchIDs(t *testing.T, s *Store, query string, limit int) []int64 {
+func searchIDs(t *testing.T, s *Store, query string, limit int) []ID {
 	t.Helper()
 	found, err := s.Search(query, limit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ids []int64
+	var ids []ID
 	for _, m := range found {
 		ids = append(ids, m.ID)
 	}
@@ -123,8 +122,14 @@ func fillRandom(t *testing.T, s *Store, r *rand.Rand, n int) {
 		}
 		mustRemember(t, s, randomWords(r, 1+r.Intn(12)), topics...)
 		if r.Intn(4) == 0 {
-			if _, err := s.Forget(int64(1 + r.Intn(i+1))); err != nil {
+			all, err := s.Memories()
+			if err != nil {
 				t.Fatal(err)
+			}
+			if len(all) > 0 {
+				if _, err := s.Forget(all[r.Intn(len(all))].ID); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 	}
@@ -214,7 +219,7 @@ func TestStaleIndexRebuilt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = raw.Set(postingKey("pebble", 999), []byte{1, 1, 0}, nil); err != nil {
+	if err = raw.Set(postingKey("pebble", ID{15: 1}), []byte{1, 1, 0}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err = raw.Set(indexVersionKey, uint64Bytes(indexVersion-1), pebble.Sync); err != nil {
@@ -230,7 +235,7 @@ func TestStaleIndexRebuilt(t *testing.T) {
 		if v, _ := s.getUint(indexVersionKey); v != indexVersion {
 			t.Fatalf("index version = %d", v)
 		}
-		if _, closer, err := s.db.Get(postingKey("pebble", 999)); err == nil {
+		if _, closer, err := s.db.Get(postingKey("pebble", ID{15: 1})); err == nil {
 			closer.Close()
 			t.Fatal("stray posting survived the rebuild")
 		}
@@ -242,7 +247,8 @@ func TestStaleIndexRebuilt(t *testing.T) {
 }
 
 // testdata/v2.pebble was written by the v2 server (commit e8ec32c). Opening it
-// adds the index and changes nothing else.
+// migrates to the current schema: the graph is rekeyed with new ids, and the
+// search index is built.
 func TestUpgradeV2(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.pebble")
 	if err := os.CopyFS(path, os.DirFS("testdata/v2.pebble")); err != nil {
@@ -251,7 +257,6 @@ func TestUpgradeV2(t *testing.T) {
 	if v := rawSchemaVersion(t, path); v != "2" {
 		t.Fatalf("fixture schema = %s", v)
 	}
-	before := graphKeys(t, path)
 	db, err := NewDb(path)
 	if err != nil {
 		t.Fatal(err)
@@ -259,39 +264,18 @@ func TestUpgradeV2(t *testing.T) {
 	if v := rawSchemaVersion(t, path); v != fmt.Sprint(schemaVersion) {
 		t.Fatalf("schema after upgrade = %s", v)
 	}
-	if after := graphKeys(t, path); !maps.Equal(before, after) {
-		t.Fatal("upgrading to v3 changed graph records")
-	}
-	if backups, _ := filepath.Glob(path + ".v*-backup-*"); len(backups) != 0 {
-		t.Fatalf("index-only upgrade made a backup: %v", backups)
+	if backups, _ := filepath.Glob(path + ".v2-backup-*"); len(backups) != 1 {
+		t.Fatalf("v2 upgrade backups = %v, want one", backups)
 	}
 	withStore(t, db, func(s *Store) {
 		for _, q := range []string{"tests", "café", "CAFÉ noir", "ci", "go", "coffee", "plain git"} {
 			checkMatchesScan(t, s, q, 10)
 		}
-		if ids := searchIDs(t, s, "café", 10); !slices.Equal(ids, []int64{7}) {
+		if ids := searchIDs(t, s, "café", 10); len(ids) != 1 {
 			t.Fatalf("café = %v", ids)
 		}
-	})
-}
-
-// graphKeys returns every non-index key and value, read straight from Pebble.
-func graphKeys(t *testing.T, path string) map[string]string {
-	t.Helper()
-	raw, err := pebble.Open(path, &pebble.Options{Logger: quietLogger{}, ReadOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	iter, _ := raw.NewIter(nil)
-	defer iter.Close()
-	out := map[string]string{}
-	for iter.First(); iter.Valid(); iter.Next() {
-		key := iter.Key()
-		if bytes.HasPrefix(key, postingPrefix) || bytes.HasPrefix(key, []byte("meta/")) {
-			continue
+		if all, err := s.Memories(); err != nil || len(all) == 0 {
+			t.Fatalf("memories after upgrade = %v, %v", all, err)
 		}
-		out[string(key)] = string(iter.Value())
-	}
-	return out
+	})
 }

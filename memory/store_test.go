@@ -36,7 +36,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func mustRemember(t *testing.T, s *Store, text string, topics ...string) int64 {
+func mustRemember(t *testing.T, s *Store, text string, topics ...string) ID {
 	t.Helper()
 	id, err := s.Remember(text, topics)
 	if err != nil {
@@ -68,7 +68,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var id int64
+	var id ID
 	withStore(t, db, func(s *Store) { id = mustRemember(t, s, "Deploys on Fridays are banned", "deploy") })
 
 	reopened, err := NewDb(path)
@@ -80,9 +80,9 @@ func TestPersistsAcrossReopen(t *testing.T) {
 		if err != nil || m == nil || m.Text != "Deploys on Fridays are banned" {
 			t.Fatalf("get after reopen = %v, %v", m, err)
 		}
-		// IDs keep increasing after reopen rather than restarting.
-		if next := mustRemember(t, s, "second"); next != id+1 {
-			t.Fatalf("next id = %d, want %d", next, id+1)
+		// New ids sort after the ones already stored.
+		if next := mustRemember(t, s, "second"); !id.Less(next) {
+			t.Fatalf("next id %s does not follow %s", next, id)
 		}
 	})
 }
@@ -123,7 +123,7 @@ func TestTopicRecallOrderAndLimit(t *testing.T) {
 	clock := int64(1_700_000_000)
 	now = func() time.Time { clock += 86400; return time.Unix(clock, 0) }
 	withStore(t, db, func(s *Store) {
-		var ids []int64
+		var ids []ID
 		for i := 0; i < 5; i++ {
 			ids = append(ids, mustRemember(t, s, fmt.Sprintf("go fact %d", i), "Go"))
 		}
@@ -134,7 +134,7 @@ func TestTopicRecallOrderAndLimit(t *testing.T) {
 		}
 		for i, m := range about { // newest first
 			if m.ID != ids[4-i] {
-				t.Fatalf("about[%d] = #%d, want #%d", i, m.ID, ids[4-i])
+				t.Fatalf("about[%d] = #%s, want #%s", i, m.ID, ids[4-i])
 			}
 		}
 	})
@@ -172,7 +172,7 @@ func TestBackupRestores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var id int64
+	var id ID
 	withStore(t, db, func(s *Store) { id = mustRemember(t, s, "Backups are checkpoints", "ops") })
 	if err = db.Backup(dir + "/backup"); err != nil {
 		t.Fatal(err)
@@ -242,10 +242,12 @@ func TestConcurrentServerProcesses(t *testing.T) {
 		if len(all) != procs*writes {
 			t.Fatalf("%d memories, want %d", len(all), procs*writes)
 		}
+		seen := map[ID]bool{}
 		for i, m := range all {
-			if m.ID != int64(i+1) {
-				t.Fatalf("memory %d has id %d: ids must be unique and dense", i, m.ID)
+			if seen[m.ID] {
+				t.Fatalf("memory %d repeats id %s", i, m.ID)
 			}
+			seen[m.ID] = true
 		}
 		for p := 0; p < procs; p++ {
 			about, err := s.About(fmt.Sprintf("proc%d", p), 100)
@@ -357,25 +359,36 @@ func TestToolsAndCall(t *testing.T) {
 		t.Fatalf("read-only flags = %v", readOnly)
 	}
 	db := testDB(t)
-	if out, err := db.Call("remember", map[string]any{"text": "Go callers pass string slices", "topics": []string{"api"}}); err != nil || out != "Remembered #1." {
+	if out, err := db.Call("remember", map[string]any{"text": "Go callers pass string slices", "topics": []string{"api"}}); err != nil || !strings.HasPrefix(out, "Remembered #") {
 		t.Fatalf("remember = %q, %v", out, err)
 	}
 	if out, err := db.Call("recall", map[string]any{"topic": "api"}); err != nil || !strings.Contains(out, "[api] Go callers") {
 		t.Fatalf("recall = %q, %v", out, err)
 	}
-	if _, err := db.Call("forget", map[string]any{"id": float64(7)}); err == nil {
+	if _, err := db.Call("forget", map[string]any{"id": ID{15: 7}.String()}); err == nil {
 		t.Fatal("forgetting a missing memory should be a tool error")
 	}
 
-	// Go callers pass plain ints, not the float64 that JSON decodes to.
 	if _, err := db.Call("remember", map[string]any{"text": "second", "topics": []string{"api"}}); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := db.Call("recall", map[string]any{"topic": "api", "limit": 1}); err != nil || strings.Count(out, "[api]") != 1 {
-		t.Fatalf("recall with int limit = %q, %v", out, err)
+		t.Fatalf("recall with limit = %q, %v", out, err)
 	}
-	if out, err := db.Call("forget", map[string]any{"id": 1}); err != nil || !strings.Contains(out, "#1") {
-		t.Fatalf("forget with int id = %q, %v", out, err)
+	// Ids are strings, so a number is not a valid id.
+	if _, err := db.Call("forget", map[string]any{"id": 1}); err == nil {
+		t.Fatal("forget with a numeric id should be a tool error")
+	}
+	var id string
+	withStore(t, db, func(s *Store) {
+		all, err := s.Memories()
+		if err != nil || len(all) == 0 {
+			t.Fatal(err)
+		}
+		id = all[0].ID.String()
+	})
+	if out, err := db.Call("forget", map[string]any{"id": id}); err != nil || out != "Forgot #"+id+"." {
+		t.Fatalf("forget = %q, %v", out, err)
 	}
 }
 
