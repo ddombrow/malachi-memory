@@ -2,3 +2,5 @@ target/
 /malachi-memory
 /bin/
 .task/
+# Pebble recreates this on open; fixtures must not carry it.
+memory/testdata/*.pebble/LOCK
