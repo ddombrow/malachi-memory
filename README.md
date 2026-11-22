@@ -4,7 +4,7 @@ A small Go MCP server (stdio) that keeps notes between agent sessions in an embe
 
 - Each memory is a node with text and creation time. Topic names are topic nodes; `ABOUT` edges connect memories to topics. Topics that share a memory are related in the graph.
 - Search uses BM25 ranking over memory text and topics from an inverted index kept in the same store, rebuilt automatically if it is ever out of date. No embeddings, LLM, or network access.
-- Pebble is the embedded key-value store; graph nodes and edges are stored using prefixed, ordered keys. The database opens around each call so several server processes can take turns sharing the same database.
+- Pebble is the embedded key-value store; graph nodes and edges are stored using prefixed, ordered keys (the layout is documented in `memory/memory.go` and `memory/index.go`). The database opens around each call so several server processes can take turns sharing the same database. Reads open it read-only and hold the lock for about a millisecond; a call that waits more than 5 seconds for another session returns a "busy" error.
 - Speaks the existing MCP interface: `server/discover` (`2026-07-28`) and the 2025 `initialize` handshake, over newline-delimited JSON-RPC.
 
 ## Tools
@@ -50,7 +50,7 @@ Without a clone, `go install github.com/ddombrow/malachi-memory@latest` also wor
 
 The Pebble database path is a directory. It records a schema version; a server refuses to open a database written in a layout it does not know rather than guess.
 
-Memory ids are ULIDs, 26-character strings such as `01KDZ98CG0FVRW5Z37E8F7V120`. They are generated locally, so independent stores can be merged. Version 1.0 changed ids from integers to these strings: `forget` no longer accepts a number, and databases from earlier versions are migrated on first open, with a backup beside them.
+Memory ids are ULIDs, 26-character strings such as `01KDZ98CG0FVRW5Z37E8F7V120`. They are generated locally, so independent stores can be merged. Version 1.0 changed ids from integers to these strings: `forget` no longer accepts a number, and databases from earlier versions are migrated on first open. Every migration first writes a checkpoint beside the database, named like `memory.pebble.v3-backup-20261122T003645Z`; delete it once you are satisfied.
 
 ## Backup and restore
 
@@ -82,6 +82,8 @@ malachi-memory --db b.pebble --import < a.jsonl
 
 Import adds memories it does not hold, applies deletions, and skips anything it has already seen, so repeating a file is harmless. Forgetting a memory held only by another store takes effect after that store's export is imported.
 
+Merging converges but does not reconcile: two contradictory memories are both kept. Memories are never edited, and tombstones never expire, so a forgotten id cannot return.
+
 ## Embedding
 
 The store, the tools and the stdio server live in package `github.com/ddombrow/malachi-memory/memory`; `main.go` only parses flags. A Go agent can run the tools in process instead of starting the server:
@@ -104,6 +106,10 @@ go test ./memory -run '^$' -bench . -benchtime 20x     # tool latency at 1k, 10k
 ```
 
 `memory/testdata/baseline.golden` is the byte-for-byte record of the MCP interface; a diff there is a change clients will see.
+
+On an Apple Silicon laptop, every read (search included) takes under about 1.5 ms at up to 100k memories, and every write about 45 ms, nearly all of it the read-write open and sync. `topics related_to` is the slowest read, about 10 ms at 100k.
+
+The search index is derived: it can be deleted and rebuilt from the graph, and a change to tokenizing bumps `indexVersion` so stores rebuild it on open. Schema changes get a versioned migration with a backup and a test against a fixture written by the previous server (`memory/testdata/v*.pebble`). Add an edge type besides `ABOUT` only alongside a tool or query that uses it.
 
 ## License
 
